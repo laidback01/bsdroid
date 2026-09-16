@@ -121,6 +121,11 @@ pub enum UsbError {
     },
     /// The host sent fewer bytes than the caller asked for.
     ShortWrite { want: usize, got: usize },
+    /// The host cannot reset the device.
+    ///
+    /// A reset needs root on FreeBSD. The kernel checks the privilege, and the
+    /// `operator` group is not enough.
+    Reset(i32),
     /// The configuration descriptor does not parse.
     Descriptor(DescriptorError),
     /// The timeout is too large for the library, which takes milliseconds in a
@@ -155,6 +160,10 @@ impl fmt::Display for UsbError {
                     "the host sent {got} bytes, and the caller asked for {want}"
                 )
             }
+            Self::Reset(c) => write!(
+                f,
+                "cannot reset the device, code {c}. A reset needs root on FreeBSD"
+            ),
             Self::Descriptor(e) => write!(f, "the descriptor does not parse: {e}"),
             Self::TimeoutTooLarge { millis } => {
                 write!(
@@ -357,7 +366,7 @@ impl<'a> OpenDevice<'a> {
         // SAFETY: `self.dev` is open.
         let rc = unsafe { sys::libusb20_dev_reset(self.dev) };
         if rc != 0 {
-            return Err(UsbError::Open(rc));
+            return Err(UsbError::Reset(rc));
         }
         Ok(())
     }

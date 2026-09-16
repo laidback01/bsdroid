@@ -42,6 +42,7 @@ fn main() -> ExitCode {
                 .unwrap_or(DEFAULT_CYCLES);
             reopen(cycles)
         }
+        Some("coldstart") => coldstart(),
         Some("--help") | Some("-h") => {
             usage();
             return ExitCode::SUCCESS;
@@ -71,6 +72,7 @@ fn usage() {
     println!("Commands:");
     println!("  mtpprobe probe          Read the device one time. This is the default.");
     println!("  mtpprobe reopen [n]     Open and close the USB device n times.");
+    println!("  mtpprobe coldstart      Reset the device, then measure the wait.");
     println!();
     println!("The reopen command repeats the pattern that simple-mtpfs uses.");
     println!("See docs/00-why.md.");
@@ -122,11 +124,59 @@ fn find_mtp(backend: &Backend, quiet: bool) -> Result<(OpenDevice<'_>, MtpInterf
         }
     }
 
-    Err(
-        "no device gives an MTP interface. Connect the phone, unlock the \
-         phone, and choose File transfer on the phone."
-            .to_string(),
-    )
+    Err(no_mtp_message(backend))
+}
+
+/// Builds a message for the case where no device gives an MTP interface.
+///
+/// The message names the cause when the host can tell the cause. An Android
+/// device that is not in file transfer mode still shows adb, if the user turned
+/// on USB debugging. The adb interface is the sign.
+fn no_mtp_message(backend: &Backend) -> String {
+    let mut android_without_mtp = Vec::new();
+
+    for d in backend.devices() {
+        let (vid, pid) = d.ids();
+        let bus = d.bus();
+        let addr = d.address();
+
+        let mut open = match d.open(4) {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        let raw = match open.config_descriptor_raw(TIMEOUT) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let cfg = match ConfigDescriptor::parse(&raw) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        if cfg.interfaces.iter().any(|i| i.is_adb()) {
+            android_without_mtp.push(format!(
+                "bus {bus}, address {addr}, vendor {vid:#06x}, product {pid:#06x}"
+            ));
+        }
+    }
+
+    if android_without_mtp.is_empty() {
+        return "no device gives an MTP interface. Connect the phone, unlock \
+                the phone, and choose File transfer on the phone."
+            .to_string();
+    }
+
+    let mut m = String::from("an Android device is connected, and the device gives no MTP\n");
+    m.push_str("  interface. The device shows the adb interface, so the device is\n");
+    m.push_str("  awake and the cable carries data.\n\n");
+    m.push_str("  The device is not in file transfer mode. On the phone:\n");
+    m.push_str("    1. Open the notification area.\n");
+    m.push_str("    2. Find the USB notification.\n");
+    m.push_str("    3. Choose File transfer.\n\n");
+    for d in &android_without_mtp {
+        m.push_str(&format!("  device: {d}\n"));
+    }
+    m
 }
 
 /// Reads the device one time.
@@ -147,14 +197,24 @@ fn probe() -> Result<(), String> {
     println!();
     println!("--- Session 1 ---");
     step(&mut s, "OpenSession", session::OP_OPEN_SESSION, &[1])?;
-    let ids = step(&mut s, "GetStorageIDs", session::OP_GET_STORAGE_IDS, &[])?;
 
-    let storage_ids = storage_ids_from(&ids.data);
-    if storage_ids.is_empty() {
-        report_no_storage();
+    let w = wait_for_storage(&mut s)?;
+    println!(
+        "    GetStorageIDs    {:>6} ms   {} attempt(s)   {} storage(s)",
+        w.elapsed.as_millis(),
+        w.attempts,
+        w.ids.len()
+    );
+    if w.attempts > 1 {
+        println!("      the first attempt gave an empty list, and the host retried");
+    }
+
+    if w.ids.is_empty() {
+        report_no_storage(&w);
         let _ = s.close_session();
         return Err("the device reports 0 storages".to_string());
     }
+    let storage_ids = w.ids.clone();
     println!("      storages: {storage_ids:?}");
 
     for id in &storage_ids {
@@ -299,20 +359,202 @@ fn storage_ids_from(data: &[u8]) -> Vec<u32> {
         .collect()
 }
 
+/// Tells you if any device gives an MTP interface.
+fn mtp_present(backend: &Backend) -> bool {
+    for d in backend.devices() {
+        let mut open = match d.open(4) {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        let raw = match open.config_descriptor_raw(TIMEOUT) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if let Ok(cfg) = ConfigDescriptor::parse(&raw) {
+            if MtpInterface::find(&cfg).is_ok() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The count of attempts the host makes to read the storage list.
+const STORAGE_ATTEMPTS: u32 = 10;
+/// The wait between two attempts to read the storage list.
+const STORAGE_RETRY_WAIT: Duration = Duration::from_millis(300);
+
+/// What one storage enumeration did.
+pub struct StorageWait {
+    /// The identifiers the device reported.
+    pub ids: Vec<u32>,
+    /// The count of attempts the host needed.
+    pub attempts: u32,
+    /// The time the host waited.
+    pub elapsed: Duration,
+}
+
+/// Reads the storage list, and retries while the device reports none.
+///
+/// An Android device answers `GetStorageIDs` with OK and an empty list while
+/// the MTP service starts. The empty list is not an error, and the list fills
+/// a moment later. A program that asks one time reports "no files" and is
+/// wrong. See `docs/01-cold-start.md`.
+///
+/// The loop has a count limit, so the loop always stops.
+fn wait_for_storage(s: &mut Session) -> Result<StorageWait, String> {
+    let started = Instant::now();
+
+    for attempt in 1..=STORAGE_ATTEMPTS {
+        let out = s
+            .operation("GetStorageIDs", session::OP_GET_STORAGE_IDS, &[])
+            .map_err(|e| format!("{e}"))?;
+        let ids = storage_ids_from(&out.data);
+
+        if !ids.is_empty() {
+            return Ok(StorageWait {
+                ids,
+                attempts: attempt,
+                elapsed: started.elapsed(),
+            });
+        }
+        if attempt < STORAGE_ATTEMPTS {
+            std::thread::sleep(STORAGE_RETRY_WAIT);
+        }
+    }
+
+    Ok(StorageWait {
+        ids: Vec::new(),
+        attempts: STORAGE_ATTEMPTS,
+        elapsed: started.elapsed(),
+    })
+}
+
 /// Tells the user why a device reports no storage.
-fn report_no_storage() {
-    println!("      storages: none");
+fn report_no_storage(w: &StorageWait) {
     println!();
-    println!("    The device answered OK and reported 0 storages.");
+    println!(
+        "    The device answered OK and reported 0 storages {} times over {} ms.",
+        w.attempts,
+        w.elapsed.as_millis()
+    );
     println!("    The transport works. The device gives no file access.");
     println!();
     println!("    An Android device reports 0 storages when one of these is true:");
+    println!("      - The MTP service is still starting. The host already");
+    println!("        retried, so this cause is unlikely here.");
     println!("      - The screen is locked. Unlock the phone.");
     println!("      - The USB mode is not File transfer. Open the USB");
     println!("        notification on the phone and choose File transfer.");
     println!("      - The phone asks permission, and nobody answered yet.");
     println!();
     println!("    Correct the phone, then run mtpprobe again.");
+}
+
+/// Resets the device and measures the time until the storage list fills.
+///
+/// A reset makes the device leave the bus and come back. The device is then in
+/// the state a user gets after a connect. The test needs no person to pull the
+/// cable.
+fn coldstart() -> Result<(), String> {
+    println!("--- Cold start test ---");
+    println!("The test resets the device, waits for the device to come back,");
+    println!("and measures the time until the device reports a storage.");
+    println!();
+
+    {
+        let backend = Backend::new().map_err(|e| e.to_string())?;
+        let (mut open, _iface) = find_mtp(&backend, false)?;
+        println!();
+        println!("  reset the device");
+        open.reset().map_err(|e| format!("cannot reset: {e}"))?;
+    }
+
+    // The device leaves the bus, and the device comes back. The host must wait
+    // for the device to go before the host waits for the device to return. A
+    // host that only waits for the return sees the device that is still on the
+    // bus, and reports a time that is too short.
+    let started = Instant::now();
+
+    // Step 1: wait for the device to leave.
+    let mut left = None;
+    for attempt in 1..=40 {
+        let backend = Backend::new().map_err(|e| e.to_string())?;
+        if mtp_present(&backend) {
+            std::thread::sleep(Duration::from_millis(100));
+        } else {
+            left = Some(attempt);
+            break;
+        }
+    }
+    match left {
+        Some(_) => println!(
+            "  the device left the bus after {} ms",
+            started.elapsed().as_millis()
+        ),
+        None => println!("  the device did not leave the bus. The reset did nothing."),
+    }
+
+    // Step 2: wait for the device to return.
+    let mut came_back = None;
+    for _ in 1..=60 {
+        let backend = Backend::new().map_err(|e| e.to_string())?;
+        if mtp_present(&backend) {
+            came_back = Some(started.elapsed());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    match came_back {
+        Some(t) => println!("  the device came back after {} ms", t.as_millis()),
+        None => {
+            println!();
+            println!("  The device did not come back with an MTP interface.");
+            println!("  An Android device often leaves file transfer mode after a");
+            println!("  USB reset, and the device then needs the user to choose");
+            println!("  File transfer again.");
+            return Err("the device gave no MTP interface after the reset".to_string());
+        }
+    }
+
+    let backend = Backend::new().map_err(|e| e.to_string())?;
+    let (mut open, iface) = find_mtp(&backend, true)?;
+    if open.kernel_driver_active(iface.interface_number) {
+        let _ = open.detach_kernel_driver(iface.interface_number);
+    }
+    let channels = open
+        .open_mtp(&iface, BULK_BUFFER)
+        .map_err(|e| format!("cannot open the endpoints: {e}"))?;
+    let mut s = Session::new(channels, TIMEOUT);
+    s.open_session(1).map_err(|e| format!("{e}"))?;
+
+    let w = wait_for_storage(&mut s)?;
+    let _ = s.close_session();
+
+    println!();
+    if w.ids.is_empty() {
+        println!(
+            "  the device reported 0 storages after {} attempts",
+            w.attempts
+        );
+        return Err("the device gave no storage after a reset".to_string());
+    }
+
+    println!("  attempts until a storage appeared: {}", w.attempts);
+    println!(
+        "  time until a storage appeared:     {} ms",
+        w.elapsed.as_millis()
+    );
+    println!("  storages: {:?}", w.ids);
+    println!();
+    if w.attempts > 1 {
+        println!("  The first attempt gave an empty list. A program that asks one");
+        println!("  time reports no files, and the report is wrong.");
+    } else {
+        println!("  The first attempt gave a storage.");
+    }
+    Ok(())
 }
 
 /// Runs one operation and prints the result.

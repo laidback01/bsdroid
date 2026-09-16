@@ -29,6 +29,13 @@ pub const MTP_SUBCLASS: u8 = 0x01;
 /// The interface protocol for MTP.
 pub const MTP_PROTOCOL: u8 = 0x01;
 
+/// The interface class for adb. The class is a vendor class.
+pub const ADB_CLASS: u8 = 0xff;
+/// The interface subclass for adb.
+pub const ADB_SUBCLASS: u8 = 0x42;
+/// The interface protocol for adb.
+pub const ADB_PROTOCOL: u8 = 0x01;
+
 /// The endpoint transfer type for bulk. The value comes from the low two bits
 /// of `bmAttributes`.
 const TRANSFER_BULK: u8 = 0x02;
@@ -135,6 +142,15 @@ impl Interface {
     /// Tells you if the interface carries MTP.
     pub fn is_mtp(&self) -> bool {
         self.class == MTP_CLASS && self.subclass == MTP_SUBCLASS && self.protocol == MTP_PROTOCOL
+    }
+
+    /// Tells you if the interface carries adb.
+    ///
+    /// The interface is a sign that the device runs Android. A device that
+    /// shows adb but shows no MTP is an Android device that is not in file
+    /// transfer mode. The difference matters for a fault report.
+    pub fn is_adb(&self) -> bool {
+        self.class == ADB_CLASS && self.subclass == ADB_SUBCLASS && self.protocol == ADB_PROTOCOL
     }
 }
 

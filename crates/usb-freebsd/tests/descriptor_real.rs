@@ -113,6 +113,34 @@ fn does_not_choose_a_bulk_endpoint_from_another_interface() {
     }
 }
 
+/// A device in charge-only mode shows no MTP interface. If the device still
+/// shows adb, the host knows the device runs Android, and the host can give a
+/// better message than "no MTP device".
+#[test]
+fn finds_the_adb_interface_and_does_not_confuse_it_with_mtp() {
+    let bytes = common::load("s22_config_descriptor.hex");
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+
+    let adb: Vec<u8> = cfg
+        .interfaces
+        .iter()
+        .filter(|i| i.is_adb())
+        .map(|i| i.number)
+        .collect();
+    assert_eq!(adb, vec![3], "interface 3 carries adb");
+
+    let mtp: Vec<u8> = cfg
+        .interfaces
+        .iter()
+        .filter(|i| i.is_mtp())
+        .map(|i| i.number)
+        .collect();
+    assert_eq!(mtp, vec![0], "interface 0 carries MTP");
+
+    // No interface is both.
+    assert!(cfg.interfaces.iter().all(|i| !(i.is_mtp() && i.is_adb())));
+}
+
 #[test]
 fn reports_absence_when_the_device_has_no_mtp_interface() {
     // Take the real descriptor and change the class of interface 0. The phone
