@@ -1,0 +1,42 @@
+# BOS descriptor, Samsung SM-S901U (Galaxy S22).
+#
+# Source command:
+#   usbconfig -d ugen0.11 do_request 0x80 0x06 0x0F00 0 64
+#
+# BOS means binary device object store. The descriptor lists what a device can
+# do, and the list does not change with the speed of the link.
+#
+# The phone gave this descriptor while the link ran at high speed, which is
+# USB 2.0. The descriptor says the device supports super speed.
+#
+# The difference is the useful fact. A device that supports super speed, on a
+# link at high speed, has a cable or a port that cannot do more. The device is
+# not the limit.
+
+# --- BOS descriptor ---
+05          # bLength = 5
+0f          # bDescriptorType = 0x0f (BOS)
+1600        # wTotalLength = 22
+02          # bNumDeviceCaps = 2
+
+# --- Capability 1: USB 2.0 extension ---
+07          # bLength = 7
+10          # bDescriptorType = 0x10 (device capability)
+02          # bDevCapabilityType = 0x02 (USB 2.0 extension)
+1e210000    # bmAttributes, which holds the link power settings
+
+# --- Capability 2: super speed ---
+0a          # bLength = 10
+10          # bDescriptorType = 0x10 (device capability)
+03          # bDevCapabilityType = 0x03 (super speed USB)
+00          # bmAttributes
+0f00        # wSpeedsSupported = 0x000f
+            #   bit 0: low speed
+            #   bit 1: full speed
+            #   bit 2: high speed
+            #   bit 3: super speed
+01          # bFunctionalitySupport
+0a          # bU1DevExitLat
+ff01        # wU2DevExitLat
+
+# The lengths add to 22, which agrees with wTotalLength.

@@ -8,7 +8,9 @@
 
 mod common;
 
-use usb_freebsd::descriptor::{ConfigDescriptor, DescriptorError, MtpInterface};
+use usb_freebsd::descriptor::{
+    ConfigDescriptor, DescriptorError, DeviceCapabilities, MtpInterface,
+};
 
 /// The MTP interface class, subclass and protocol. The USB standard calls the
 /// class "still imaging".
@@ -463,6 +465,87 @@ fn two_modes_give_the_mtp_addresses_to_a_different_interface() {
             Err(DescriptorError::NoMtpInterface),
             "{name}"
         );
+    }
+}
+
+// --- The BOS descriptor, which says what the device can do ---
+
+/// This test records the finding that separates a slow device from a slow
+/// cable.
+///
+/// The phone gave this descriptor while the link ran at high speed. The
+/// descriptor says the device supports super speed. The device is therefore
+/// not the limit, and the cable or the port is.
+#[test]
+fn the_phone_supports_super_speed_on_a_high_speed_link() {
+    let bytes = common::load("s22_bos_descriptor.hex");
+    let caps = DeviceCapabilities::parse(&bytes).expect("the capture must parse");
+
+    assert!(
+        caps.super_speed,
+        "the device gives a super speed capability"
+    );
+    assert_eq!(caps.speeds_supported, Some(0x000f));
+    assert!(caps.supports_faster_than_high());
+}
+
+#[test]
+fn the_bos_fixture_agrees_with_its_own_header() {
+    let bytes = common::load("s22_bos_descriptor.hex");
+    assert_eq!(bytes.len(), 22);
+}
+
+#[test]
+fn every_speed_bit_reads_correctly() {
+    let bytes = common::load("s22_bos_descriptor.hex");
+    let caps = DeviceCapabilities::parse(&bytes).unwrap();
+    let s = caps.speeds_supported.unwrap();
+
+    assert_eq!(s & 0x0001, 0x0001, "low speed");
+    assert_eq!(s & 0x0002, 0x0002, "full speed");
+    assert_eq!(s & 0x0004, 0x0004, "high speed");
+    assert_eq!(s & 0x0008, 0x0008, "super speed");
+}
+
+#[test]
+fn a_device_without_a_super_speed_capability_reports_no_super_speed() {
+    // Keep the header and the USB 2.0 extension, and drop the super speed
+    // capability. A device that runs only at high speed gives this shape.
+    let full = common::load("s22_bos_descriptor.hex");
+    let mut bytes = full[..12].to_vec();
+    bytes[2..4].copy_from_slice(&12u16.to_le_bytes());
+    bytes[4] = 1; // one capability
+
+    let caps = DeviceCapabilities::parse(&bytes).expect("the header is valid");
+    assert!(!caps.super_speed);
+    assert!(!caps.supports_faster_than_high());
+}
+
+#[test]
+fn a_bos_descriptor_with_the_wrong_type_is_an_error() {
+    let mut bytes = common::load("s22_bos_descriptor.hex");
+    bytes[1] = 0x02;
+    assert!(matches!(
+        DeviceCapabilities::parse(&bytes),
+        Err(DescriptorError::WrongType { .. })
+    ));
+}
+
+#[test]
+fn a_zero_length_capability_does_not_cause_an_endless_loop() {
+    let mut bytes = common::load("s22_bos_descriptor.hex");
+    bytes[5] = 0x00; // bLength of the first capability
+    assert!(matches!(
+        DeviceCapabilities::parse(&bytes),
+        Err(DescriptorError::ZeroLength { .. })
+    ));
+}
+
+#[test]
+fn every_truncation_of_the_bos_descriptor_is_safe() {
+    let full = common::load("s22_bos_descriptor.hex");
+    for n in 0..full.len() {
+        let _ = DeviceCapabilities::parse(&full[..n]);
     }
 }
 

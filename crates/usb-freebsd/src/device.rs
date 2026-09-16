@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 use std::ptr;
 use std::time::Duration;
 
-use crate::descriptor::{ConfigDescriptor, DescriptorError, MtpInterface};
+use crate::descriptor::{ConfigDescriptor, DescriptorError, DeviceCapabilities, MtpInterface};
 use crate::sys;
 
 /// A limit on the device count.
@@ -41,6 +41,10 @@ const DESCRIPTOR_TYPE_CONFIGURATION: u16 = 0x0200;
 ///
 /// The request puts the protocol state of the device back to the start.
 const PTP_DEVICE_RESET_REQUEST: u8 = 0x66;
+
+/// Descriptor type 0x0f is the BOS descriptor. The value sits in the high byte
+/// of `wValue`.
+const DESCRIPTOR_TYPE_BOS: u16 = 0x0f00;
 
 /// What a transfer did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,6 +448,52 @@ impl<'a> OpenDevice<'a> {
         }
         buf.truncate(actual as usize);
         Ok(buf)
+    }
+
+    /// Reads the raw BOS descriptor with a control request.
+    ///
+    /// BOS means binary device object store. The descriptor says what the
+    /// device can do, and the answer does not change with the speed of the
+    /// link. A device that has no BOS descriptor answers with a fault, and
+    /// that answer means the device runs at high speed at most.
+    pub fn bos_descriptor_raw(&mut self, timeout: Duration) -> Result<Vec<u8>, UsbError> {
+        let ms = timeout_millis(timeout)?;
+        let mut buf = vec![0u8; 256];
+        let mut actual: u16 = 0;
+
+        // SAFETY: the setup struct is plain data, and the format field points
+        // at the format the library gives. The buffer holds `buf.len()` bytes,
+        // and `wLength` says so.
+        let rc = unsafe {
+            let mut setup: sys::LIBUSB20_CONTROL_SETUP_DECODED = core::mem::zeroed();
+            setup.LIBUSB20_CONTROL_SETUP_FORMAT = sys::LIBUSB20_CONTROL_SETUP_FORMAT.as_ptr();
+            setup.bmRequestType = REQUEST_TYPE_IN_STANDARD_DEVICE;
+            setup.bRequest = REQUEST_GET_DESCRIPTOR;
+            setup.wValue = DESCRIPTOR_TYPE_BOS;
+            setup.wIndex = 0;
+            setup.wLength = buf.len() as u16;
+
+            sys::libusb20_dev_request_sync(
+                self.dev,
+                &mut setup,
+                buf.as_mut_ptr() as *mut c_void,
+                &mut actual,
+                ms,
+                0,
+            )
+        };
+
+        if rc != 0 {
+            return Err(UsbError::Control(rc));
+        }
+        buf.truncate(actual as usize);
+        Ok(buf)
+    }
+
+    /// Reads what the device says it can do.
+    pub fn capabilities(&mut self, timeout: Duration) -> Result<DeviceCapabilities, UsbError> {
+        let raw = self.bos_descriptor_raw(timeout)?;
+        Ok(DeviceCapabilities::parse(&raw)?)
     }
 
     /// Reads the configuration descriptor and finds the MTP interface.

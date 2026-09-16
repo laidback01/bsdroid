@@ -190,6 +190,12 @@ pub struct Session<'a> {
     channels: MtpChannels<'a>,
     transaction: u32,
     timeout: Duration,
+    /// True when the host opened a session and did not close it.
+    ///
+    /// A command that fails leaves the session open. The next program then
+    /// meets a device that answers "session already open", and the fault looks
+    /// like a broken device. [`Drop`] closes the session for this reason.
+    session_open: bool,
 }
 
 impl<'a> Session<'a> {
@@ -202,6 +208,7 @@ impl<'a> Session<'a> {
             channels,
             transaction: 0,
             timeout,
+            session_open: false,
         };
         // A program that stopped in the middle of a transfer can leave the
         // device with bytes to send. Start from a known state.
@@ -412,12 +419,22 @@ impl<'a> Session<'a> {
 
     /// Sends `OpenSession` with a session id.
     pub fn open_session(&mut self, id: u32) -> Result<Outcome, SessionError> {
-        self.operation("OpenSession", OP_OPEN_SESSION, &[id])
+        let out = self.operation("OpenSession", OP_OPEN_SESSION, &[id])?;
+        if out.is_ok() || out.response_code == RESP_SESSION_ALREADY_OPEN {
+            self.session_open = true;
+        }
+        Ok(out)
     }
 
     /// Sends `CloseSession`.
     pub fn close_session(&mut self) -> Result<Outcome, SessionError> {
-        self.operation("CloseSession", OP_CLOSE_SESSION, &[])
+        let out = self.operation("CloseSession", OP_CLOSE_SESSION, &[]);
+        if let Ok(o) = &out {
+            if o.is_ok() {
+                self.session_open = false;
+            }
+        }
+        out
     }
 
     /// Opens a session, and repairs the state of an earlier session.
@@ -456,6 +473,26 @@ impl<'a> Session<'a> {
             report_wedged_service();
         }
         Ok(second)
+    }
+}
+
+impl Drop for Session<'_> {
+    /// Closes the session that the host opened.
+    ///
+    /// A command that fails returns early, and an early return leaves the
+    /// session open on the device. The next program then meets a device that
+    /// answers "session already open".
+    ///
+    /// This project caused that fault many times before this code existed. A
+    /// session must close itself, and a caller must not need to remember.
+    fn drop(&mut self) {
+        if !self.session_open {
+            return;
+        }
+        // The device can still hold bytes from a data phase that failed. Clear
+        // the endpoints, or the close does not reach the device.
+        let _ = self.recover();
+        let _ = self.close_session();
     }
 }
 

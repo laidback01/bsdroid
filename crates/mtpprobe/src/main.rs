@@ -533,23 +533,39 @@ fn bench() -> Result<(), String> {
     println!("    The estimate is a guide, and not a standard. A rate near the");
     println!("    estimate means the link limits the copy, and the code does not.");
 
-    // A device at high speed, on a host that has a super speed device, points
-    // at the cable. A cable for a telephone often holds no super speed wires.
+    // The BOS descriptor says what the device can do, and the answer does not
+    // change with the speed of the link. A device that supports super speed,
+    // on a link at high speed, has a cable or a port that cannot do more.
+    //
+    // An earlier version compared the speed of other devices on the host. That
+    // test gives a guess. This test gives an answer from the device.
     if speed == LinkSpeed::High {
-        let host_has_super = backend
-            .devices()
-            .iter()
-            .any(|d| d.speed() == LinkSpeed::Super || d.speed() == LinkSpeed::SuperPlus);
-        if host_has_super {
-            println!();
-            println!("    The link runs at high speed, which is USB 2.0. Another");
-            println!("    device on this host runs at super speed, so the host and");
-            println!("    the port can do more.");
-            println!();
-            println!("    A cable is the common cause. A cable for a telephone often");
-            println!("    holds no super speed wires, and the plug looks the same.");
-            println!("    Try a cable that came with a disk, or a cable that says");
-            println!("    USB 3.");
+        match open.capabilities(TIMEOUT) {
+            Ok(caps) if caps.supports_faster_than_high() => {
+                println!();
+                println!("    The device says it supports super speed, and the link");
+                println!("    runs at high speed. The device is not the limit.");
+                println!();
+                println!("    The BOS descriptor of the device gives this answer. The");
+                println!("    answer does not change with the cable, so the answer is");
+                println!("    about the device alone.");
+                println!();
+                println!("    The cable or the port is the limit. A cable for a");
+                println!("    telephone often holds no super speed wires, and the plug");
+                println!("    looks the same as a cable that does.");
+            }
+            Ok(_) => {
+                println!();
+                println!("    The device does not report super speed. High speed is");
+                println!("    therefore the limit of the device, and a faster cable");
+                println!("    gives no faster copy.");
+            }
+            Err(_) => {
+                println!();
+                println!("    The device gives no BOS descriptor, which means the device");
+                println!("    runs at high speed at most. A faster cable gives no faster");
+                println!("    copy.");
+            }
         }
     }
 

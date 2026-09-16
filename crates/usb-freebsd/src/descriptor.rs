@@ -333,6 +333,112 @@ impl MtpInterface {
     }
 }
 
+/// Descriptor type for the binary device object store.
+const TYPE_BOS: u8 = 0x0f;
+/// Descriptor type for one device capability.
+const TYPE_DEVICE_CAPABILITY: u8 = 0x10;
+/// Capability type for super speed.
+const CAPABILITY_SUPER_SPEED: u8 = 0x03;
+/// Capability type for super speed plus.
+const CAPABILITY_SUPER_SPEED_PLUS: u8 = 0x0a;
+
+/// The bit of `wSpeedsSupported` that means super speed.
+const SPEED_BIT_SUPER: u16 = 0x0008;
+
+/// What a device says it can do, from the BOS descriptor.
+///
+/// BOS means binary device object store. The list does not change with the
+/// speed of the link, so the list tells a host what the device could do on a
+/// better cable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCapabilities {
+    /// The device holds a super speed capability descriptor.
+    pub super_speed: bool,
+    /// The device holds a super speed plus capability descriptor.
+    pub super_speed_plus: bool,
+    /// The raw value of `wSpeedsSupported`, if the device gives one.
+    pub speeds_supported: Option<u16>,
+}
+
+impl DeviceCapabilities {
+    /// Reads a BOS descriptor.
+    ///
+    /// The loop advances by the length of each capability. A length of 0 gives
+    /// an error, so the loop always stops. See rule 1 in `docs/00-why.md`.
+    pub fn parse(buf: &[u8]) -> Result<Self, DescriptorError> {
+        if buf.len() < 5 {
+            return Err(DescriptorError::TooShort {
+                need: 5,
+                got: buf.len(),
+            });
+        }
+        if buf[1] != TYPE_BOS {
+            return Err(DescriptorError::WrongType {
+                expected: TYPE_BOS,
+                got: buf[1],
+            });
+        }
+
+        let total = u16::from_le_bytes([buf[2], buf[3]]) as usize;
+        let end = core::cmp::min(buf.len(), total);
+
+        let mut out = Self {
+            super_speed: false,
+            super_speed_plus: false,
+            speeds_supported: None,
+        };
+
+        let mut pos = buf[0] as usize;
+        if pos == 0 {
+            return Err(DescriptorError::ZeroLength { at: 0 });
+        }
+
+        while pos + 3 <= end {
+            let len = buf[pos] as usize;
+            if len == 0 {
+                return Err(DescriptorError::ZeroLength { at: pos });
+            }
+            if pos + len > end {
+                return Err(DescriptorError::RunsPastEnd {
+                    at: pos,
+                    need: len,
+                    got: end - pos,
+                });
+            }
+
+            if buf[pos + 1] == TYPE_DEVICE_CAPABILITY {
+                match buf[pos + 2] {
+                    CAPABILITY_SUPER_SPEED => {
+                        out.super_speed = true;
+                        // wSpeedsSupported sits at offset 4 of the capability.
+                        if len >= 6 {
+                            out.speeds_supported =
+                                Some(u16::from_le_bytes([buf[pos + 4], buf[pos + 5]]));
+                        }
+                    }
+                    CAPABILITY_SUPER_SPEED_PLUS => out.super_speed_plus = true,
+                    _ => {}
+                }
+            }
+
+            pos += len;
+        }
+
+        Ok(out)
+    }
+
+    /// Tells you if the device can run faster than high speed.
+    pub fn supports_faster_than_high(&self) -> bool {
+        if self.super_speed_plus || self.super_speed {
+            return true;
+        }
+        match self.speeds_supported {
+            Some(s) => s & SPEED_BIT_SUPER != 0,
+            None => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
