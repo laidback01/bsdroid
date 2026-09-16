@@ -113,9 +113,10 @@ fn does_not_choose_a_bulk_endpoint_from_another_interface() {
     }
 }
 
-/// A device in charge-only mode shows no MTP interface. If the device still
-/// shows adb, the host knows the device runs Android, and the host can give a
-/// better message than "no MTP device".
+/// The adb interface tells the host that the device runs Android.
+///
+/// A device that shows adb and shows no MTP gets a better message than a
+/// generic "no MTP device". The adb interface is the sign of Android.
 #[test]
 fn finds_the_adb_interface_and_does_not_confuse_it_with_mtp() {
     let bytes = common::load("s22_config_descriptor.hex");
@@ -153,6 +154,78 @@ fn reports_absence_when_the_device_has_no_mtp_interface() {
         MtpInterface::find(&cfg),
         Err(DescriptorError::NoMtpInterface)
     );
+}
+
+// --- Charge mode ---
+//
+// The same phone in charge mode gives a different descriptor. The tests below
+// record what a host can learn from the descriptor, and what a host cannot.
+
+#[test]
+fn the_charge_mode_fixture_agrees_with_its_own_header() {
+    let bytes = common::load("s22_charge_mode_descriptor.hex");
+    assert_eq!(bytes.len(), 70);
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+    assert_eq!(cfg.total_length, 70);
+    assert_eq!(cfg.num_interfaces, 2);
+}
+
+/// This test records the finding that matters for a diagnostic message.
+///
+/// A phone in charge mode still gives the MTP interface. A host that finds an
+/// MTP interface does not know that the host can read a file.
+#[test]
+fn charge_mode_still_gives_an_mtp_interface() {
+    let bytes = common::load("s22_charge_mode_descriptor.hex");
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+
+    let mtp = MtpInterface::find(&cfg).expect("charge mode still gives MTP");
+    assert_eq!(mtp.interface_number, 0);
+    assert_eq!(mtp.bulk_in, 0x81);
+    assert_eq!(mtp.bulk_out, 0x01);
+    assert_eq!(mtp.interrupt_in, Some(0x82));
+}
+
+/// The MTP interface is the same in both captures. A host cannot compare the
+/// two interfaces and learn anything about file access.
+#[test]
+fn the_mtp_interface_is_the_same_in_both_captures() {
+    let transfer = common::load("s22_config_descriptor.hex");
+    let charge = common::load("s22_charge_mode_descriptor.hex");
+
+    let a = MtpInterface::find(&ConfigDescriptor::parse(&transfer).unwrap()).unwrap();
+    let b = MtpInterface::find(&ConfigDescriptor::parse(&charge).unwrap()).unwrap();
+
+    assert_eq!(a.interface_number, b.interface_number);
+    assert_eq!(a.bulk_in, b.bulk_in);
+    assert_eq!(a.bulk_out, b.bulk_out);
+    assert_eq!(a.interrupt_in, b.interrupt_in);
+    assert_eq!(a.max_packet_size, b.max_packet_size);
+}
+
+/// The adb interface number is not the same in the two captures. A host must
+/// not remember an interface number from an earlier connect.
+///
+/// The test does not claim that the USB mode sets the number. A later capture
+/// of the same phone, in the same mode, gave the other layout. See
+/// `docs/02-device-states.md`.
+#[test]
+fn the_adb_interface_number_is_not_stable_across_captures() {
+    let transfer = common::load("s22_config_descriptor.hex");
+    let charge = common::load("s22_charge_mode_descriptor.hex");
+
+    let adb_number = |bytes: &[u8]| -> u8 {
+        ConfigDescriptor::parse(bytes)
+            .unwrap()
+            .interfaces
+            .iter()
+            .find(|i| i.is_adb())
+            .expect("both modes give adb")
+            .number
+    };
+
+    assert_eq!(adb_number(&transfer), 3, "capture A, file transfer");
+    assert_eq!(adb_number(&charge), 1, "capture B, charge and locked");
 }
 
 // --- Tests for damaged input ---

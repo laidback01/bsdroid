@@ -431,24 +431,34 @@ fn wait_for_storage(s: &mut Session) -> Result<StorageWait, String> {
 }
 
 /// Tells the user why a device reports no storage.
+///
+/// The host cannot name one cause. A phone in charge mode and a phone with a
+/// locked screen give the same answer, and both keep the MTP interface. See
+/// `docs/02-device-states.md`.
 fn report_no_storage(w: &StorageWait) {
     println!();
+    println!("    What the host knows:");
+    println!("      - The device has an MTP interface, and the host opened it.");
+    println!("      - The device answered every command with 0x2001 OK.");
     println!(
-        "    The device answered OK and reported 0 storages {} times over {} ms.",
+        "      - The device reported 0 storages {} times over {} ms.",
         w.attempts,
         w.elapsed.as_millis()
     );
-    println!("    The transport works. The device gives no file access.");
     println!();
-    println!("    An Android device reports 0 storages when one of these is true:");
-    println!("      - The MTP service is still starting. The host already");
-    println!("        retried, so this cause is unlikely here.");
-    println!("      - The screen is locked. Unlock the phone.");
-    println!("      - The USB mode is not File transfer. Open the USB");
-    println!("        notification on the phone and choose File transfer.");
-    println!("      - The phone asks permission, and nobody answered yet.");
+    println!("    The cable works and the device works. The device holds back");
+    println!("    the storage, and the device reports no fault. The hold is a");
+    println!("    choice the device makes.");
     println!();
-    println!("    Correct the phone, then run mtpprobe again.");
+    println!("    Do these two things on the phone, in this order:");
+    println!("      1. Unlock the screen.");
+    println!("      2. Open the USB notification and choose File transfer.");
+    println!();
+    println!("    Step 2 is the common cause. A phone in charge mode still shows");
+    println!("    the MTP interface, so the host cannot see the mode. The host");
+    println!("    cannot tell you which of the two steps you need.");
+    println!();
+    println!("    Then run mtpprobe again.");
 }
 
 /// Resets the device and measures the time until the storage list fills.

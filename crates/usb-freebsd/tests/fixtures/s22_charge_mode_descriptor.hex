@@ -1,0 +1,48 @@
+# USB configuration descriptor, Samsung SM-S901U in charge mode.
+#
+# Source command:
+#   usbconfig -d ugen0.11 do_request 0x80 0x06 0x0200 0 256
+#
+# Device state at the moment of the capture:
+#   sys.usb.config      sec_charging,adb
+#   screen              LOCKED
+#   GetStorageIDs       0x2001 OK, 0 storages
+#
+# Record the screen state. A later capture of the same phone, in the same USB
+# mode but with the screen unlocked, gave 4 interfaces and 136 bytes. The
+# interface count is therefore not a property of the USB mode alone. See
+# docs/02-device-states.md.
+#
+# The important fact: the MTP interface is here, and the phone gives no file
+# access. A host that finds an MTP interface does not know that the host can
+# read a file.
+#
+# Compare this file with s22_config_descriptor.hex, which the same phone gave
+# in file transfer mode. The MTP interface is identical in both files. The
+# adb interface number is not.
+
+# --- Configuration descriptor ---
+09          # bLength = 9
+02          # bDescriptorType = 2 (CONFIGURATION)
+4600        # wTotalLength = 70
+02          # bNumInterfaces = 2
+01          # bConfigurationValue = 1
+04          # iConfiguration = 4
+80          # bmAttributes = 0x80 (bus power)
+fa          # bMaxPower = 250, which is 500 mA
+
+# --- Interface 0: MTP. The interface is present, and it gives no storage. ---
+09 04 00 00 03 06 01 01 05
+07 05 81 02 0002 00   # endpoint 0x81, bulk, 512 bytes. Same as file transfer.
+07 05 01 02 0002 00   # endpoint 0x01, bulk, 512 bytes. Same as file transfer.
+07 05 82 03 1c00 06   # endpoint 0x82, interrupt, 28 bytes.
+
+# --- Interface 1: adb. The number is 1 here, and 3 in file transfer mode. ---
+09 04 01 00 02 ff 42 01 06
+07 05 02 02 0002 00   # endpoint 0x02, bulk
+07 05 83 02 0002 00   # endpoint 0x83, bulk
+
+# --- A vendor descriptor at the end ---
+08 24 80 0c 00 01 00 01
+
+# The lengths add to 70, which agrees with wTotalLength.
