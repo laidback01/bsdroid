@@ -29,9 +29,24 @@ controls.
 
 ## Crates
 
-| Crate       | Purpose                                     | State       |
-| ----------- | ------------------------------------------- | ----------- |
-| `ptp-proto` | PTP wire format. No I/O and no dependency.  | 17 tests pass |
+| Crate         | Purpose                                      | State           |
+| ------------- | -------------------------------------------- | --------------- |
+| `ptp-proto`   | PTP wire format. No I/O and no dependency.   | tests pass      |
+| `usb-freebsd` | USB transport over `libusb20`.               | tests pass      |
+| `mtpprobe`    | Reports what a device does, and where it stops. | works on one phone |
+
+## mtpprobe
+
+```
+cargo run --bin mtpprobe
+```
+
+The program finds an MTP device, reads the storage, and reports each step with
+a time. Every transfer has a 5 second deadline, so the program always stops.
+
+The program also sends the operation sequence that stops `simple-mtpfs` and
+`jmtpfs`. On a Samsung SM-S901U each step takes 3 milliseconds or less, and the
+program does not stop. `docs/00-why.md` gives the numbers.
 
 ## Tests
 

@@ -9,70 +9,54 @@
 )]
 
 pub const LIBUSB20_MAX_FRAME_PRE_SCALE: u32 = 2147483648;
-#[doc = " Success (no error)"]
+pub const LIBUSB20_DT_DEVICE_SIZE: u32 = 18;
+pub const LIBUSB20_DT_CONFIG_SIZE: u32 = 9;
+pub const LIBUSB20_DT_INTERFACE_SIZE: u32 = 9;
+pub const LIBUSB20_DT_ENDPOINT_SIZE: u32 = 7;
+pub const LIBUSB20_DT_ENDPOINT_AUDIO_SIZE: u32 = 9;
+pub const LIBUSB20_DT_HUB_NONVAR_SIZE: u32 = 7;
+pub const LIBUSB20_DT_SS_ENDPOINT_COMPANION_SIZE: u32 = 6;
+pub const LIBUSB20_DT_BOS_SIZE: u32 = 5;
+pub const LIBUSB20_USB_2_0_EXTENSION_DEVICE_CAPABILITY_SIZE: u32 = 7;
+pub const LIBUSB20_SS_USB_DEVICE_CAPABILITY_SIZE: u32 = 10;
+pub const LIBUSB20_ENDPOINT_ADDRESS_MASK: u32 = 15;
+pub const LIBUSB20_ENDPOINT_DIR_MASK: u32 = 128;
+pub const LIBUSB20_TRANSFER_TYPE_MASK: u32 = 3;
+pub const LIBUSB20_ISO_SYNC_TYPE_MASK: u32 = 12;
+pub const LIBUSB20_ISO_USAGE_TYPE_MASK: u32 = 48;
 pub const libusb20_error_LIBUSB20_SUCCESS: libusb20_error = 0;
-#[doc = " Input/output error"]
 pub const libusb20_error_LIBUSB20_ERROR_IO: libusb20_error = -1;
-#[doc = " Invalid parameter"]
 pub const libusb20_error_LIBUSB20_ERROR_INVALID_PARAM: libusb20_error = -2;
-#[doc = " Access denied (insufficient permissions)"]
 pub const libusb20_error_LIBUSB20_ERROR_ACCESS: libusb20_error = -3;
-#[doc = " No such device (it may have been disconnected)"]
 pub const libusb20_error_LIBUSB20_ERROR_NO_DEVICE: libusb20_error = -4;
-#[doc = " Entity not found"]
 pub const libusb20_error_LIBUSB20_ERROR_NOT_FOUND: libusb20_error = -5;
-#[doc = " Resource busy"]
 pub const libusb20_error_LIBUSB20_ERROR_BUSY: libusb20_error = -6;
-#[doc = " Operation timed out"]
 pub const libusb20_error_LIBUSB20_ERROR_TIMEOUT: libusb20_error = -7;
-#[doc = " Overflow"]
 pub const libusb20_error_LIBUSB20_ERROR_OVERFLOW: libusb20_error = -8;
-#[doc = " Pipe error"]
 pub const libusb20_error_LIBUSB20_ERROR_PIPE: libusb20_error = -9;
-#[doc = " System call interrupted (perhaps due to signal)"]
 pub const libusb20_error_LIBUSB20_ERROR_INTERRUPTED: libusb20_error = -10;
-#[doc = " Insufficient memory"]
 pub const libusb20_error_LIBUSB20_ERROR_NO_MEM: libusb20_error = -11;
-#[doc = " Operation not supported or unimplemented on this platform"]
 pub const libusb20_error_LIBUSB20_ERROR_NOT_SUPPORTED: libusb20_error = -12;
-#[doc = " Other error"]
 pub const libusb20_error_LIBUSB20_ERROR_OTHER: libusb20_error = -99;
-#[doc = " \\ingroup misc\n Error codes. Most libusb20 functions return 0 on success or one of\n these codes on failure."]
 pub type libusb20_error = ::std::os::raw::c_int;
-#[doc = " Transfer completed without error. Note that this does not\n indicate that the entire amount of requested data was\n transferred."]
 pub const libusb20_transfer_status_LIBUSB20_TRANSFER_COMPLETED: libusb20_transfer_status = 0;
-#[doc = " Callback code to start transfer"]
 pub const libusb20_transfer_status_LIBUSB20_TRANSFER_START: libusb20_transfer_status = 1;
-#[doc = " Drain complete callback code"]
 pub const libusb20_transfer_status_LIBUSB20_TRANSFER_DRAINED: libusb20_transfer_status = 2;
-#[doc = " Transfer failed"]
 pub const libusb20_transfer_status_LIBUSB20_TRANSFER_ERROR: libusb20_transfer_status = 3;
-#[doc = " Transfer timed out"]
 pub const libusb20_transfer_status_LIBUSB20_TRANSFER_TIMED_OUT: libusb20_transfer_status = 4;
-#[doc = " Transfer was cancelled"]
 pub const libusb20_transfer_status_LIBUSB20_TRANSFER_CANCELLED: libusb20_transfer_status = 5;
-#[doc = " For bulk/interrupt endpoints: halt condition detected\n (endpoint stalled). For control endpoints: control request\n not supported."]
 pub const libusb20_transfer_status_LIBUSB20_TRANSFER_STALL: libusb20_transfer_status = 6;
-#[doc = " Device was disconnected"]
 pub const libusb20_transfer_status_LIBUSB20_TRANSFER_NO_DEVICE: libusb20_transfer_status = 7;
-#[doc = " Device sent more data than requested"]
 pub const libusb20_transfer_status_LIBUSB20_TRANSFER_OVERFLOW: libusb20_transfer_status = 8;
-#[doc = " \\ingroup asyncio\n libusb20_tr_get_status() values"]
 pub type libusb20_transfer_status = ::std::os::raw::c_uint;
-#[doc = " Report a short frame as error"]
 pub const libusb20_transfer_flags_LIBUSB20_TRANSFER_SINGLE_SHORT_NOT_OK: libusb20_transfer_flags =
     1;
-#[doc = " Multiple short frames are not allowed"]
 pub const libusb20_transfer_flags_LIBUSB20_TRANSFER_MULTI_SHORT_NOT_OK: libusb20_transfer_flags = 2;
-#[doc = " All transmitted frames are short terminated"]
 pub const libusb20_transfer_flags_LIBUSB20_TRANSFER_FORCE_SHORT: libusb20_transfer_flags = 4;
-#[doc = " Will do a clear-stall before xfer"]
 pub const libusb20_transfer_flags_LIBUSB20_TRANSFER_DO_CLEAR_STALL: libusb20_transfer_flags = 8;
-#[doc = " \\ingroup asyncio\n libusb20_tr_set_flags() values"]
 pub type libusb20_transfer_flags = ::std::os::raw::c_uint;
 pub const libusb20_device_mode_LIBUSB20_MODE_HOST: libusb20_device_mode = 0;
 pub const libusb20_device_mode_LIBUSB20_MODE_DEVICE: libusb20_device_mode = 1;
-#[doc = " \\ingroup misc\n libusb20_dev_get_mode() values"]
 pub type libusb20_device_mode = ::std::os::raw::c_uint;
 pub const LIBUSB20_SPEED_UNKNOWN: _bindgen_ty_1 = 0;
 pub const LIBUSB20_SPEED_LOW: _bindgen_ty_1 = 1;
@@ -81,14 +65,12 @@ pub const LIBUSB20_SPEED_HIGH: _bindgen_ty_1 = 3;
 pub const LIBUSB20_SPEED_VARIABLE: _bindgen_ty_1 = 4;
 pub const LIBUSB20_SPEED_SUPER: _bindgen_ty_1 = 5;
 pub const LIBUSB20_SPEED_SUPER_PLUS: _bindgen_ty_1 = 6;
-#[doc = " \\ingroup misc\n libusb20_dev_get_speed() values"]
 pub type _bindgen_ty_1 = ::std::os::raw::c_uint;
 pub const LIBUSB20_POWER_OFF: _bindgen_ty_2 = 0;
 pub const LIBUSB20_POWER_ON: _bindgen_ty_2 = 1;
 pub const LIBUSB20_POWER_SAVE: _bindgen_ty_2 = 2;
 pub const LIBUSB20_POWER_SUSPEND: _bindgen_ty_2 = 3;
 pub const LIBUSB20_POWER_RESUME: _bindgen_ty_2 = 4;
-#[doc = " \\ingroup misc\n libusb20_dev_set_power() values"]
 pub type _bindgen_ty_2 = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -118,21 +100,6 @@ pub struct libusb20_device {
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct libusb20_device_methods {
-    _unused: [u8; 0],
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct libusb20_config {
-    _unused: [u8; 0],
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct LIBUSB20_CONTROL_SETUP_DECODED {
-    _unused: [u8; 0],
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct LIBUSB20_DEVICE_DESC_DECODED {
     _unused: [u8; 0],
 }
 pub type libusb20_tr_callback_t =
@@ -534,4 +501,272 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn libusb20_be_free(pbe: *mut libusb20_backend);
+}
+pub const LIBUSB20_ME_INT8: _bindgen_ty_3 = 0;
+pub const LIBUSB20_ME_INT16: _bindgen_ty_3 = 1;
+pub const LIBUSB20_ME_INT32: _bindgen_ty_3 = 2;
+pub const LIBUSB20_ME_INT64: _bindgen_ty_3 = 3;
+pub const LIBUSB20_ME_STRUCT: _bindgen_ty_3 = 4;
+pub const LIBUSB20_ME_MAX: _bindgen_ty_3 = 5;
+pub type _bindgen_ty_3 = ::std::os::raw::c_uint;
+pub const LIBUSB20_ME_IS_UNSIGNED: _bindgen_ty_4 = 0;
+pub const LIBUSB20_ME_IS_SIGNED: _bindgen_ty_4 = 128;
+pub const LIBUSB20_ME_MASK: _bindgen_ty_4 = 127;
+pub type _bindgen_ty_4 = ::std::os::raw::c_uint;
+pub const LIBUSB20_ME_IS_RAW: _bindgen_ty_5 = 0;
+pub const LIBUSB20_ME_IS_ENCODED: _bindgen_ty_5 = 1;
+pub const LIBUSB20_ME_IS_EMPTY: _bindgen_ty_5 = 2;
+pub const LIBUSB20_ME_IS_DECODED: _bindgen_ty_5 = 3;
+pub type _bindgen_ty_5 = ::std::os::raw::c_uint;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct libusb20_me_struct {
+    pub ptr: *mut ::std::os::raw::c_void,
+    pub len: u16,
+    pub type_: u16,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct libusb20_me_format {
+    pub format: *const u8,
+    pub desc: *const ::std::os::raw::c_char,
+    pub fields: *const ::std::os::raw::c_char,
+}
+unsafe extern "C" {
+    pub static LIBUSB20_DEVICE_DESC_FORMAT: [libusb20_me_format; 1usize];
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LIBUSB20_DEVICE_DESC_DECODED {
+    pub LIBUSB20_DEVICE_DESC_FORMAT: *const libusb20_me_format,
+    pub bLength: u8,
+    pub bDescriptorType: u8,
+    pub bcdUSB: u16,
+    pub bDeviceClass: u8,
+    pub bDeviceSubClass: u8,
+    pub bDeviceProtocol: u8,
+    pub bMaxPacketSize0: u8,
+    pub idVendor: u16,
+    pub idProduct: u16,
+    pub bcdDevice: u16,
+    pub iManufacturer: u8,
+    pub iProduct: u8,
+    pub iSerialNumber: u8,
+    pub bNumConfigurations: u8,
+}
+unsafe extern "C" {
+    pub static LIBUSB20_ENDPOINT_DESC_FORMAT: [libusb20_me_format; 1usize];
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LIBUSB20_ENDPOINT_DESC_DECODED {
+    pub LIBUSB20_ENDPOINT_DESC_FORMAT: *const libusb20_me_format,
+    pub bLength: u8,
+    pub bDescriptorType: u8,
+    pub bEndpointAddress: u8,
+    pub bmAttributes: u8,
+    pub wMaxPacketSize: u16,
+    pub bInterval: u8,
+    pub bRefresh: u8,
+    pub bSynchAddress: u8,
+}
+unsafe extern "C" {
+    pub static LIBUSB20_INTERFACE_DESC_FORMAT: [libusb20_me_format; 1usize];
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LIBUSB20_INTERFACE_DESC_DECODED {
+    pub LIBUSB20_INTERFACE_DESC_FORMAT: *const libusb20_me_format,
+    pub bLength: u8,
+    pub bDescriptorType: u8,
+    pub bInterfaceNumber: u8,
+    pub bAlternateSetting: u8,
+    pub bNumEndpoints: u8,
+    pub bInterfaceClass: u8,
+    pub bInterfaceSubClass: u8,
+    pub bInterfaceProtocol: u8,
+    pub iInterface: u8,
+}
+unsafe extern "C" {
+    pub static LIBUSB20_CONFIG_DESC_FORMAT: [libusb20_me_format; 1usize];
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LIBUSB20_CONFIG_DESC_DECODED {
+    pub LIBUSB20_CONFIG_DESC_FORMAT: *const libusb20_me_format,
+    pub bLength: u8,
+    pub bDescriptorType: u8,
+    pub wTotalLength: u16,
+    pub bNumInterfaces: u8,
+    pub bConfigurationValue: u8,
+    pub iConfiguration: u8,
+    pub bmAttributes: u8,
+    pub bMaxPower: u8,
+}
+unsafe extern "C" {
+    pub static LIBUSB20_CONTROL_SETUP_FORMAT: [libusb20_me_format; 1usize];
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LIBUSB20_CONTROL_SETUP_DECODED {
+    pub LIBUSB20_CONTROL_SETUP_FORMAT: *const libusb20_me_format,
+    pub bmRequestType: u8,
+    pub bRequest: u8,
+    pub wValue: u16,
+    pub wIndex: u16,
+    pub wLength: u16,
+}
+unsafe extern "C" {
+    pub static LIBUSB20_SS_ENDPT_COMP_DESC_FORMAT: [libusb20_me_format; 1usize];
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LIBUSB20_SS_ENDPT_COMP_DESC_DECODED {
+    pub LIBUSB20_SS_ENDPT_COMP_DESC_FORMAT: *const libusb20_me_format,
+    pub bLength: u8,
+    pub bDescriptorType: u8,
+    pub bMaxBurst: u8,
+    pub bmAttributes: u8,
+    pub wBytesPerInterval: u16,
+}
+unsafe extern "C" {
+    pub static LIBUSB20_USB_20_DEVCAP_DESC_FORMAT: [libusb20_me_format; 1usize];
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LIBUSB20_USB_20_DEVCAP_DESC_DECODED {
+    pub LIBUSB20_USB_20_DEVCAP_DESC_FORMAT: *const libusb20_me_format,
+    pub bLength: u8,
+    pub bDescriptorType: u8,
+    pub bDevCapabilityType: u8,
+    pub bmAttributes: u32,
+}
+unsafe extern "C" {
+    pub static LIBUSB20_SS_USB_DEVCAP_DESC_FORMAT: [libusb20_me_format; 1usize];
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LIBUSB20_SS_USB_DEVCAP_DESC_DECODED {
+    pub LIBUSB20_SS_USB_DEVCAP_DESC_FORMAT: *const libusb20_me_format,
+    pub bLength: u8,
+    pub bDescriptorType: u8,
+    pub bDevCapabilityType: u8,
+    pub bmAttributes: u8,
+    pub wSpeedSupported: u16,
+    pub bFunctionalitySupport: u8,
+    pub bU1DevExitLat: u8,
+    pub wU2DevExitLat: u16,
+}
+unsafe extern "C" {
+    pub static LIBUSB20_BOS_DESCRIPTOR_FORMAT: [libusb20_me_format; 1usize];
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LIBUSB20_BOS_DESCRIPTOR_DECODED {
+    pub LIBUSB20_BOS_DESCRIPTOR_FORMAT: *const libusb20_me_format,
+    pub bLength: u8,
+    pub bDescriptorType: u8,
+    pub wTotalLength: u16,
+    pub bNumDeviceCaps: u8,
+}
+pub const libusb20_class_code_LIBUSB20_CLASS_PER_INTERFACE: libusb20_class_code = 0;
+pub const libusb20_class_code_LIBUSB20_CLASS_AUDIO: libusb20_class_code = 1;
+pub const libusb20_class_code_LIBUSB20_CLASS_COMM: libusb20_class_code = 2;
+pub const libusb20_class_code_LIBUSB20_CLASS_HID: libusb20_class_code = 3;
+pub const libusb20_class_code_LIBUSB20_CLASS_PRINTER: libusb20_class_code = 7;
+pub const libusb20_class_code_LIBUSB20_CLASS_PTP: libusb20_class_code = 6;
+pub const libusb20_class_code_LIBUSB20_CLASS_MASS_STORAGE: libusb20_class_code = 8;
+pub const libusb20_class_code_LIBUSB20_CLASS_HUB: libusb20_class_code = 9;
+pub const libusb20_class_code_LIBUSB20_CLASS_DATA: libusb20_class_code = 10;
+pub const libusb20_class_code_LIBUSB20_CLASS_VENDOR_SPEC: libusb20_class_code = 255;
+pub type libusb20_class_code = ::std::os::raw::c_uint;
+pub const libusb20_descriptor_type_LIBUSB20_DT_DEVICE: libusb20_descriptor_type = 1;
+pub const libusb20_descriptor_type_LIBUSB20_DT_CONFIG: libusb20_descriptor_type = 2;
+pub const libusb20_descriptor_type_LIBUSB20_DT_STRING: libusb20_descriptor_type = 3;
+pub const libusb20_descriptor_type_LIBUSB20_DT_INTERFACE: libusb20_descriptor_type = 4;
+pub const libusb20_descriptor_type_LIBUSB20_DT_ENDPOINT: libusb20_descriptor_type = 5;
+pub const libusb20_descriptor_type_LIBUSB20_DT_HID: libusb20_descriptor_type = 33;
+pub const libusb20_descriptor_type_LIBUSB20_DT_REPORT: libusb20_descriptor_type = 34;
+pub const libusb20_descriptor_type_LIBUSB20_DT_PHYSICAL: libusb20_descriptor_type = 35;
+pub const libusb20_descriptor_type_LIBUSB20_DT_HUB: libusb20_descriptor_type = 41;
+pub const libusb20_descriptor_type_LIBUSB20_DT_BOS: libusb20_descriptor_type = 15;
+pub const libusb20_descriptor_type_LIBUSB20_DT_DEVICE_CAPABILITY: libusb20_descriptor_type = 16;
+pub const libusb20_descriptor_type_LIBUSB20_DT_SS_ENDPOINT_COMPANION: libusb20_descriptor_type = 48;
+pub type libusb20_descriptor_type = ::std::os::raw::c_uint;
+pub const libusb20_device_capability_type_LIBUSB20_WIRELESS_USB_DEVICE_CAPABILITY:
+    libusb20_device_capability_type = 1;
+pub const libusb20_device_capability_type_LIBUSB20_USB_2_0_EXTENSION_DEVICE_CAPABILITY:
+    libusb20_device_capability_type = 2;
+pub const libusb20_device_capability_type_LIBUSB20_SS_USB_DEVICE_CAPABILITY:
+    libusb20_device_capability_type = 3;
+pub const libusb20_device_capability_type_LIBUSB20_CONTAINER_ID_DEVICE_CAPABILITY:
+    libusb20_device_capability_type = 4;
+pub type libusb20_device_capability_type = ::std::os::raw::c_uint;
+pub const libusb20_endpoint_direction_LIBUSB20_ENDPOINT_IN: libusb20_endpoint_direction = 128;
+pub const libusb20_endpoint_direction_LIBUSB20_ENDPOINT_OUT: libusb20_endpoint_direction = 0;
+pub type libusb20_endpoint_direction = ::std::os::raw::c_uint;
+pub const libusb20_transfer_type_LIBUSB20_TRANSFER_TYPE_CONTROL: libusb20_transfer_type = 0;
+pub const libusb20_transfer_type_LIBUSB20_TRANSFER_TYPE_ISOCHRONOUS: libusb20_transfer_type = 1;
+pub const libusb20_transfer_type_LIBUSB20_TRANSFER_TYPE_BULK: libusb20_transfer_type = 2;
+pub const libusb20_transfer_type_LIBUSB20_TRANSFER_TYPE_INTERRUPT: libusb20_transfer_type = 3;
+pub type libusb20_transfer_type = ::std::os::raw::c_uint;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_GET_STATUS: libusb20_standard_request = 0;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_CLEAR_FEATURE: libusb20_standard_request = 1;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_SET_FEATURE: libusb20_standard_request = 3;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_SET_ADDRESS: libusb20_standard_request = 5;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_GET_DESCRIPTOR: libusb20_standard_request = 6;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_SET_DESCRIPTOR: libusb20_standard_request = 7;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_GET_CONFIGURATION: libusb20_standard_request =
+    8;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_SET_CONFIGURATION: libusb20_standard_request =
+    9;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_GET_INTERFACE: libusb20_standard_request = 10;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_SET_INTERFACE: libusb20_standard_request = 11;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_SYNCH_FRAME: libusb20_standard_request = 12;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_SET_SEL: libusb20_standard_request = 48;
+pub const libusb20_standard_request_LIBUSB20_REQUEST_SET_ISOCH_DELAY: libusb20_standard_request =
+    49;
+pub type libusb20_standard_request = ::std::os::raw::c_uint;
+pub const libusb20_request_type_LIBUSB20_REQUEST_TYPE_STANDARD: libusb20_request_type = 0;
+pub const libusb20_request_type_LIBUSB20_REQUEST_TYPE_CLASS: libusb20_request_type = 32;
+pub const libusb20_request_type_LIBUSB20_REQUEST_TYPE_VENDOR: libusb20_request_type = 64;
+pub const libusb20_request_type_LIBUSB20_REQUEST_TYPE_RESERVED: libusb20_request_type = 96;
+pub type libusb20_request_type = ::std::os::raw::c_uint;
+pub const libusb20_request_recipient_LIBUSB20_RECIPIENT_DEVICE: libusb20_request_recipient = 0;
+pub const libusb20_request_recipient_LIBUSB20_RECIPIENT_INTERFACE: libusb20_request_recipient = 1;
+pub const libusb20_request_recipient_LIBUSB20_RECIPIENT_ENDPOINT: libusb20_request_recipient = 2;
+pub const libusb20_request_recipient_LIBUSB20_RECIPIENT_OTHER: libusb20_request_recipient = 3;
+pub type libusb20_request_recipient = ::std::os::raw::c_uint;
+pub const libusb20_iso_sync_type_LIBUSB20_ISO_SYNC_TYPE_NONE: libusb20_iso_sync_type = 0;
+pub const libusb20_iso_sync_type_LIBUSB20_ISO_SYNC_TYPE_ASYNC: libusb20_iso_sync_type = 1;
+pub const libusb20_iso_sync_type_LIBUSB20_ISO_SYNC_TYPE_ADAPTIVE: libusb20_iso_sync_type = 2;
+pub const libusb20_iso_sync_type_LIBUSB20_ISO_SYNC_TYPE_SYNC: libusb20_iso_sync_type = 3;
+pub type libusb20_iso_sync_type = ::std::os::raw::c_uint;
+pub const libusb20_iso_usage_type_LIBUSB20_ISO_USAGE_TYPE_DATA: libusb20_iso_usage_type = 0;
+pub const libusb20_iso_usage_type_LIBUSB20_ISO_USAGE_TYPE_FEEDBACK: libusb20_iso_usage_type = 1;
+pub const libusb20_iso_usage_type_LIBUSB20_ISO_USAGE_TYPE_IMPLICIT: libusb20_iso_usage_type = 2;
+pub type libusb20_iso_usage_type = ::std::os::raw::c_uint;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct libusb20_endpoint {
+    pub desc: LIBUSB20_ENDPOINT_DESC_DECODED,
+    pub extra: libusb20_me_struct,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct libusb20_interface {
+    pub desc: LIBUSB20_INTERFACE_DESC_DECODED,
+    pub extra: libusb20_me_struct,
+    pub altsetting: *mut libusb20_interface,
+    pub endpoints: *mut libusb20_endpoint,
+    pub num_altsetting: u8,
+    pub num_endpoints: u8,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct libusb20_config {
+    pub desc: LIBUSB20_CONFIG_DESC_DECODED,
+    pub extra: libusb20_me_struct,
+    pub interface: *mut libusb20_interface,
+    pub num_interface: u8,
 }

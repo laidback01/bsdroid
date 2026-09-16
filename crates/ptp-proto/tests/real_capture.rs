@@ -98,6 +98,43 @@ fn parses_storage_info_and_agrees_with_mtp_detect() {
     assert_eq!(info.volume_identifier, "");
 }
 
+// --- Tests that build a container ---
+//
+// A device produced each fixture below. The tests compare the bytes the
+// builder writes with the bytes the device sent. The device is the authority.
+
+#[test]
+fn builds_the_same_bytes_the_device_sent_for_get_storage_ids() {
+    let expected = common::load("get_storage_ids_command.hex");
+    let got = ptp_proto::build_command(OP_GET_STORAGE_IDS, 33, &[]);
+    assert_eq!(got, expected, "the builder must agree with the device");
+}
+
+#[test]
+fn builds_the_same_bytes_the_device_sent_for_get_storage_info() {
+    let expected = common::load("get_storage_info_command.hex");
+    let got = ptp_proto::build_command(OP_GET_STORAGE_INFO, 34, &[0x0001_0001]);
+    assert_eq!(got, expected, "the builder must agree with the device");
+}
+
+#[test]
+fn builds_the_same_bytes_the_device_sent_for_close_session() {
+    let expected = common::load("close_session_command.hex");
+    let got = ptp_proto::build_command(OP_CLOSE_SESSION, 35, &[]);
+    assert_eq!(got, expected, "the builder must agree with the device");
+}
+
+#[test]
+fn a_built_container_parses_back_to_the_same_values() {
+    let bytes = ptp_proto::build_command(0x1002, 7, &[1]);
+    let c = Container::parse(&bytes).expect("the builder must write a valid container");
+    assert_eq!(c.kind, ContainerType::Command);
+    assert_eq!(c.code, 0x1002);
+    assert_eq!(c.transaction_id, 7);
+    assert_eq!(c.parameters(), vec![1]);
+    assert_eq!(c.length as usize, bytes.len());
+}
+
 // --- Tests for damaged input ---
 //
 // The defect that started this project was an endless loop. A parser must

@@ -78,15 +78,41 @@ A capture with `LIBMTP_DEBUG=9` shows the last operations before the loop:
 
 The device answers `CloseSession` correctly. The loop starts after the answer.
 
-`simple-mtpfs` opens a session to read the device name. The program then closes
-the session. The program then opens a second session for the mount. The second
-open stops.
+### A first idea, which a test disproved
 
-Three facts support this reading:
+The first version of this document gave a reason for the loop. `simple-mtpfs`
+opens a PTP session, closes the session, and opens a second session. The idea
+was that the phone stops at the second open.
 
-- `mtp-detect` completes. The program opens one session.
-- `simple-mtpfs -l` completes. The program opens one session.
-- A mount stops. A mount opens two sessions.
+`mtpprobe` tested the idea against the same phone. The program sent this exact
+sequence through `libusb20`:
+
+| Step | Operation      | Time  | Result |
+| ---- | -------------- | ----- | ------ |
+| 1    | OpenSession    | 2 ms  | OK     |
+| 2    | GetStorageIDs  | 1 ms  | OK     |
+| 3    | GetStorageInfo | 3 ms  | OK     |
+| 4    | CloseSession   | 0 ms  | OK     |
+| 5    | OpenSession    | 1 ms  | OK     |
+
+Step 5 is the step the idea said must fail. Step 5 took 1 millisecond and gave
+OK.
+
+**The idea was wrong.** The phone accepts a second PTP session. The phone is
+not the cause, and no phone quirk is the cause.
+
+### What the test leaves
+
+The loop is a fault in the `libusb-1.0` compatibility layer alone. The PTP
+session cycle does not cause the loop.
+
+One difference remains between `mtpprobe` and `simple-mtpfs`. `mtpprobe` opens
+the USB device one time. `simple-mtpfs` opens the USB device, closes the USB
+device, and opens the USB device a second time. A USB device open is not a PTP
+session open.
+
+The next test must repeat the USB device open and close cycle. This document
+does not yet say that the cycle is the cause, because no test shows it.
 
 ## What the project rules out
 

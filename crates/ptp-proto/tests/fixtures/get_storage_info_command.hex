@@ -1,0 +1,13 @@
+# PTP command container: GetStorageInfo, with one parameter
+# Source: Samsung SM-S901U, LIBMTP_DEBUG=9 capture, FreeBSD 15.1-RELEASE-p2.
+#
+# A test builds this container and compares the result with these bytes. The
+# device produced the bytes, so the test proves the builder agrees with a real
+# device and not with an idea of the standard.
+
+10000000    # length = 16 (u32 little-endian), header plus one parameter
+0100        # container type = 1 (Command)
+0510        # operation code = 0x1005 (GetStorageInfo)
+22000000    # transaction id = 34
+
+01000100    # parameter 1: StorageID = 0x00010001

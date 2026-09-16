@@ -176,6 +176,44 @@ impl<'a> Container<'a> {
     pub fn payload_as_u32_array(&self) -> Result<Vec<u32>, ParseError> {
         Reader::new(self.payload).read_u32_array("array")
     }
+
+    /// Reads the payload as the parameters of a command or a response.
+    ///
+    /// A parameter is a `u32`, and the container holds up to five. The
+    /// function ignores a byte after the last whole parameter.
+    pub fn parameters(&self) -> Vec<u32> {
+        self.payload
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+}
+
+/// Builds a container for the wire.
+///
+/// The function writes the header and then the payload. The length field
+/// counts the header, which is what a device expects.
+pub fn build(kind: ContainerType, code: u16, transaction_id: u32, payload: &[u8]) -> Vec<u8> {
+    let length = (HEADER_LEN + payload.len()) as u32;
+    let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
+    out.extend_from_slice(&length.to_le_bytes());
+    out.extend_from_slice(&kind.to_wire().to_le_bytes());
+    out.extend_from_slice(&code.to_le_bytes());
+    out.extend_from_slice(&transaction_id.to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Builds a command container with `u32` parameters.
+///
+/// The standard allows up to five parameters. The function does not check the
+/// count, because a device rejects a container it does not accept.
+pub fn build_command(code: u16, transaction_id: u32, params: &[u32]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(params.len() * 4);
+    for p in params {
+        payload.extend_from_slice(&p.to_le_bytes());
+    }
+    build(ContainerType::Command, code, transaction_id, &payload)
 }
 
 /// A cursor that reads fields from a buffer and checks every read.

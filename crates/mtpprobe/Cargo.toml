@@ -1,0 +1,16 @@
+[package]
+name = "mtpprobe"
+description = "Reports what an Android device does over MTP, and where a transfer stops."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ptp-proto = { path = "../ptp-proto" }
+usb-freebsd = { path = "../usb-freebsd" }
+
+[[bin]]
+name = "mtpprobe"
+path = "src/main.rs"

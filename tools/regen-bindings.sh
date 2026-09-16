@@ -20,13 +20,26 @@ set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 header=/usr/include/libusb20.h
+desc_header=/usr/include/libusb20_desc.h
 out="$repo_root/crates/usb-freebsd/src/sys.rs"
 
-if [ ! -f "$header" ]; then
-    echo "regen-bindings: cannot find $header." >&2
-    echo "  The file comes with the FreeBSD base system." >&2
-    exit 2
-fi
+for h in "$header" "$desc_header"; do
+    if [ ! -f "$h" ]; then
+        echo "regen-bindings: cannot find $h." >&2
+        echo "  The file comes with the FreeBSD base system." >&2
+        exit 2
+    fi
+done
+
+# libusb20.h declares LIBUSB20_CONTROL_SETUP_DECODED, and libusb20_desc.h
+# defines the fields. A wrapper header pulls in both, so the bindings hold the
+# fields and not an opaque type.
+wrapper=$(mktemp -t bsdroid_wrapper) || exit 2
+trap 'rm -f "$wrapper" "$wrapper.h"' EXIT INT TERM
+mv "$wrapper" "$wrapper.h"
+wrapper="$wrapper.h"
+printf '#include <libusb20.h>\n#include <libusb20_desc.h>\n' > "$wrapper"
+header=$wrapper
 
 if ! command -v bindgen >/dev/null 2>&1; then
     echo "regen-bindings: cannot find bindgen." >&2

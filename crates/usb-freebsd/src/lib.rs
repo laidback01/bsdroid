@@ -16,6 +16,9 @@
 //! get stuck in.
 
 pub mod descriptor;
+pub mod device;
 
 #[allow(clippy::all)]
 mod sys;
+
+pub use device::{Backend, BulkChannel, DeviceHandle, OpenDevice, TransferStatus, UsbError};
