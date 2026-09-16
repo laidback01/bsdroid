@@ -1,0 +1,12 @@
+[package]
+name = "ptp-proto"
+description = "PTP/MTP wire format. Pure parsing and building, with no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# This crate has no dependencies, and it must keep no dependencies.
+# The crate does no I/O. A test runs it without a device.
+[dependencies]

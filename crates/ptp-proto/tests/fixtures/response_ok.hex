@@ -1,0 +1,9 @@
+# PTP response container: OK
+# Source: Samsung SM-S901U, LIBMTP_DEBUG=9 capture, FreeBSD 15.1-RELEASE-p2.
+
+0c000000    # length = 12 (u32 little-endian)
+0300        # container type = 3 (Response)
+0120        # response code = 0x2001 (OK)
+21000000    # transaction id = 33, matches the command
+
+# The device closes every operation with a response container.

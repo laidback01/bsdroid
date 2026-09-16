@@ -1,0 +1,10 @@
+# PTP command container: CloseSession
+# Source: Samsung SM-S901U, LIBMTP_DEBUG=9 capture, FreeBSD 15.1-RELEASE-p2.
+#
+# The device answered this container with response code OK. The libusb busy
+# loop starts immediately after the answer. See docs/00-why.md.
+
+0c000000    # length = 12 (u32 little-endian)
+0100        # container type = 1 (Command)
+0310        # operation code = 0x1003 (CloseSession)
+23000000    # transaction id = 35

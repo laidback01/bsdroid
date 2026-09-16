@@ -1,0 +1,13 @@
+# PTP data container: GetStorageIDs response payload
+# Source: Samsung SM-S901U, LIBMTP_DEBUG=9 capture, FreeBSD 15.1-RELEASE-p2.
+
+14000000    # length = 20 (u32 little-endian)
+0200        # container type = 2 (Data)
+0410        # operation code = 0x1004 (GetStorageIDs)
+21000000    # transaction id = 33, matches the command
+
+# Payload: a PTP array of StorageID.
+01000000    # element count = 1
+01000100    # StorageID = 0x00010001
+
+# The device reports one storage. The S22 has no SD card slot.

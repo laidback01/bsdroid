@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/ptp-proto"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.82"
+license = "BSD-2-Clause"
+repository = "https://github.com/statorit/bsdroid"
+
+[profile.release]
+overflow-checks = true
