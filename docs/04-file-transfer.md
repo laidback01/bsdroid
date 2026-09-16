@@ -59,6 +59,54 @@ small fixed cost and the device sends the same bytes.
 The environment variable `BSDROID_READ_BUFFER` sets the read size. The variable
 is a test hook, and not a setting for a user.
 
+## What limits the rate
+
+The first measurement gave 32.1 MiB each second. The question is what sets the
+limit: the code, the phone, the cable or the port.
+
+The project tested each one.
+
+| Test                                 | Result                          | What the result rules out |
+| ------------------------------------ | ------------------------------- | ------------------------- |
+| Phone through a chain of hubs        | HIGH speed, 32.1 MiB/s          | nothing yet               |
+| Phone direct to a port on the board  | HIGH speed, no change           | the hub chain             |
+| Second cable, heavier shielding      | HIGH speed, no change           | one bad cable             |
+| BOS descriptor of the phone          | the phone supports super speed  | the phone                 |
+| Flash drive on the same controller   | SUPER speed, 5 Gbit each second | the host and the driver   |
+
+The phone can do more, and the host can do more. The cable is the part that
+remains.
+
+### The BOS descriptor is the useful test
+
+A host cannot learn the ability of a device from the speed of the link. A
+device that supports super speed, on a cable with no super speed wires, reports
+high speed.
+
+The BOS descriptor holds the answer, and the answer does not change with the
+cable:
+
+```
+0a 10 03 00 0f 00 01 0a ff 01
+      ^^          ^^^^^
+      |           wSpeedsSupported = 0x000f
+      bDevCapabilityType = 0x03, super speed
+```
+
+`wSpeedsSupported` holds one bit for each speed. Bit 3 means super speed, and
+the phone sets the bit.
+
+`mtpprobe bench` reads this descriptor. A user therefore learns whether a
+better cable helps, before the user buys a cable.
+
+### A cable for a telephone is often USB 2.0
+
+A cable that carries only USB 2.0 needs 4 wires. A cable that carries super
+speed needs 9. The plug looks the same.
+
+Two cables gave high speed on the test system. A cable that came with a disk is
+a better test than a cable that came with a telephone.
+
 ## The link runs at 480 Mbit each second
 
 A USB link at high speed carries 480 Mbit each second, which is 60 MB each
