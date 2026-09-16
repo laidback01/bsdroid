@@ -109,6 +109,30 @@ the storage alone finds no difference.
 
 The object count is the only test that shows the difference.
 
+### The count is not a property of the modes
+
+The two counts, 2059 and 821, come from one phone with one set of files. The
+owner of the test phone makes photographs and videos, and keeps few other
+files. A phone with much music gives a much larger difference.
+
+Do not use the ratio. Use the folder list, which does not change with the
+files:
+
+- Image transfer mode gives `Pictures` and `DCIM`.
+- File transfer mode gives those two folders, and 11 more.
+
+### What a photograph user gets
+
+`Screenshots` and `Messages` are folders inside `Pictures`. Image transfer mode
+gives `Pictures`, so image transfer mode gives both folders.
+
+A user who wants a photograph, a video, a screenshot or an image from a message
+loses nothing in image transfer mode.
+
+`Download` is a folder in the root, and image transfer mode hides the root
+folders other than `Pictures` and `DCIM`. A file in `Download` is therefore not
+reachable in image transfer mode.
+
 ### What to tell a user
 
 Image transfer mode is a fallback for a photograph. Image transfer mode is not
