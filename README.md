@@ -55,6 +55,33 @@ The project needs reports from many devices. At present the project has one:
 The documentation uses Simplified Technical English (ASD-STE100). Many readers
 of this project read English as a second language.
 
+A check enforces the rules. The check does not depend on the judgment of the
+writer:
+
+```
+git clone --depth 1 https://github.com/AminBlg/SimpleEnglish.git ../SimpleEnglish
+sh tools/lint-docs.sh
+```
+
+The check reads every Markdown file. If a file holds a violation, the check
+fails. The linter comes from the SimpleEnglish project, under the MIT licence.
+This repository does not copy the linter.
+
+The check measures the mechanical rules:
+
+- sentence length
+- contraction
+- perfect tense
+- semicolon and em dash
+- Latin abbreviation
+- vague word
+- trailing condition
+
+The check does not measure the approved word list. ASD controls the
+distribution of the list, so no project can ship the list. A reader who owns
+the Issue 9 specification can make a local word list. The `tools/ste-dictionary`
+directory of the SimpleEnglish project shows how.
+
 ## Licence
 
 BSD 2-Clause.
