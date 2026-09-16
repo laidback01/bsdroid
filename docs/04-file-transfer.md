@@ -66,16 +66,36 @@ limit: the code, the phone, the cable or the port.
 
 The project tested each one.
 
-| Test                                 | Result                          | What the result rules out |
-| ------------------------------------ | ------------------------------- | ------------------------- |
-| Phone through a chain of hubs        | HIGH speed, 32.1 MiB/s          | nothing yet               |
-| Phone direct to a port on the board  | HIGH speed, no change           | the hub chain             |
-| Second cable, heavier shielding      | HIGH speed, no change           | one bad cable             |
-| BOS descriptor of the phone          | the phone supports super speed  | the phone                 |
-| Flash drive on the same controller   | SUPER speed, 5 Gbit each second | the host and the driver   |
+| Test                                  | Result                          | What the result rules out |
+| ------------------------------------- | ------------------------------- | ------------------------- |
+| Phone through a chain of hubs         | HIGH speed, 32.1 MiB/s          | nothing yet               |
+| Phone direct to a port on the board   | HIGH speed, no change           | the hub chain             |
+| Second cable, heavier shielding       | HIGH speed, no change           | one bad cable             |
+| BOS descriptor of the phone           | the phone supports super speed  | the phone                 |
+| Flash drive, back panel               | SUPER speed, 5 Gbit each second | the host and the driver   |
+| Flash drive, the port the phone used  | SUPER speed, 5 Gbit each second | that port, and the hubs   |
 
-The phone can do more, and the host can do more. The cable is the part that
-remains.
+The last test is the one that closes the question. A flash drive needs no
+cable, and the drive reached super speed in the same port that gave the phone
+high speed.
+
+Every part of the path can do super speed:
+
+- the phone, by the BOS descriptor,
+- the port, by the flash drive,
+- the hubs, because the port sits behind them,
+- the host and the driver, by the 400 MB each second the drive reached.
+
+The cable is the only part left, and two cables gave the same result. Both
+cables carry USB 2.0.
+
+### A claim this test corrected
+
+An earlier note in this project said the chain of hubs set the limit. The note
+came from one measurement, and the note named a cause with no test.
+
+The flash drive reached super speed through the same chain of hubs. The hubs
+were never the limit.
 
 ### The BOS descriptor is the useful test
 
