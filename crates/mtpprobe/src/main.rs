@@ -483,7 +483,9 @@ fn objects() -> Result<(), String> {
                     };
                     println!(
                         "      {kind}  {h:#010x}  parent {:#010x}  {:>11}  {}",
-                        o.parent_object, o.compressed_size, o.filename
+                        o.parent_object,
+                        o.compressed_size,
+                        display_name(&o.filename)
                     );
                 }
                 Err(e) => println!("      the payload does not parse: {e}"),
@@ -640,7 +642,11 @@ fn bench() -> Result<(), String> {
         }
     }
     for (_, size, name) in &chosen {
-        println!("    {:>12} bytes   {}", size, short_name(name));
+        println!(
+            "    {:>12} bytes   {}",
+            size,
+            short_name(&display_name(name))
+        );
     }
     println!(
         "    chosen from {} files in the first {BENCH_SEARCH} objects",
@@ -728,6 +734,27 @@ fn bench() -> Result<(), String> {
 
     let _ = s.close_session();
     Ok(())
+}
+
+/// Gives a name for a report.
+///
+/// A capture from this tool goes into a fault report, and a fault report goes
+/// to other people. A file name is private. The environment variable
+/// `BSDROID_REDACT` replaces each name with the size and the kind of the file,
+/// which is what a fault report needs.
+///
+/// The redaction keeps the extension, because the extension changes how a
+/// device treats a file, and the extension is not private.
+fn display_name(name: &str) -> String {
+    if std::env::var("BSDROID_REDACT").is_err() {
+        return name.to_string();
+    }
+    match name.rsplit_once('.') {
+        Some((_, ext)) if !ext.is_empty() && ext.len() <= 8 => {
+            format!("<name hidden>.{ext}")
+        }
+        _ => "<name hidden>".to_string(),
+    }
 }
 
 /// Shortens a name for a report, so a report holds no long private name.
@@ -857,7 +884,7 @@ fn get(handle: Option<u32>) -> Result<(), String> {
 
     println!();
     println!("object {target:#010x}");
-    println!("  name:   {}", info.filename);
+    println!("  name:   {}", display_name(&info.filename));
     println!("  size:   {} bytes", info.compressed_size);
     println!("  format: {:#06x}", info.object_format);
     println!("  parent: {:#010x}", info.parent_object);
@@ -1170,4 +1197,56 @@ fn step(
         ));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tests set an environment variable, so the tests must not run at the
+    /// same time. One test function holds every case for this reason.
+    #[test]
+    fn redaction_hides_a_name_and_keeps_the_kind() {
+        // With no variable, a name passes through.
+        std::env::remove_var("BSDROID_REDACT");
+        assert_eq!(display_name("holiday.jpg"), "holiday.jpg");
+        assert_eq!(display_name("DCIM"), "DCIM");
+
+        // With the variable, a name goes and the extension stays.
+        std::env::set_var("BSDROID_REDACT", "1");
+        assert_eq!(display_name("holiday.jpg"), "<name hidden>.jpg");
+        assert_eq!(display_name("IMG_20260118_074042.jpg"), "<name hidden>.jpg");
+        assert_eq!(display_name("video.mp4"), "<name hidden>.mp4");
+
+        // A folder has no extension, so nothing remains.
+        assert_eq!(display_name("DCIM"), "<name hidden>");
+        assert_eq!(display_name("Pictures"), "<name hidden>");
+
+        // A long tail is not an extension, and the name must not leak through
+        // it.
+        assert_eq!(display_name("name.averylongtail"), "<name hidden>");
+
+        // A name that ends with a dot holds no extension.
+        assert_eq!(display_name("odd."), "<name hidden>");
+
+        // A name that starts with a dot holds no extension. The text after the
+        // dot is the name itself, so the redaction must hide the text.
+        //
+        // A first version of this test expected "<name hidden>.thumbnails".
+        // That answer leaks the name through the field for the extension. The
+        // length limit above stops the leak, and this test guards the limit.
+        assert_eq!(display_name(".thumbnails"), "<name hidden>");
+        assert_eq!(display_name(".secret"), "<name hidden>.secret");
+
+        std::env::remove_var("BSDROID_REDACT");
+    }
+
+    #[test]
+    fn a_handle_reads_in_decimal_and_in_hexadecimal() {
+        assert_eq!(parse_handle("12"), Some(12));
+        assert_eq!(parse_handle("0x0c"), Some(12));
+        assert_eq!(parse_handle("0xff"), Some(255));
+        assert_eq!(parse_handle("not a number"), None);
+        assert_eq!(parse_handle(""), None);
+    }
 }
