@@ -435,7 +435,14 @@ impl<'a> Session<'a> {
         }
 
         println!("    a session from an earlier program is open, and the host closes it");
-        let _ = self.close_session();
+        match self.close_session() {
+            Ok(o) => println!(
+                "    CloseSession gave {:#06x} {}",
+                o.response_code,
+                response_name(o.response_code)
+            ),
+            Err(e) => println!("    CloseSession failed: {e}"),
+        }
 
         // The close can leave bytes on the way. Clear the endpoints before the
         // next command, or the next command meets a busy device.
@@ -443,8 +450,42 @@ impl<'a> Session<'a> {
         if dropped > 0 {
             println!("    the host dropped {dropped} more bytes");
         }
-        self.open_session(id)
+
+        let second = self.open_session(id)?;
+        if second.response_code == RESP_SESSION_ALREADY_OPEN {
+            report_wedged_service();
+        }
+        Ok(second)
     }
+}
+
+/// Tells the user how to repair the MTP service of the device.
+///
+/// The device answers `OpenSession` with "session already open", and the
+/// device does not answer `CloseSession`. The MTP service of the device holds
+/// a session, and the service does not release the session.
+///
+/// A cable disconnect does not repair this state. The USB connection starts
+/// again, and the service on the device keeps running.
+fn report_wedged_service() {
+    println!();
+    println!("    The device still reports an open session.");
+    println!();
+    println!("    What the host measured:");
+    println!("      - OpenSession answers, and the answer is 0x201e.");
+    println!("      - CloseSession gets no answer, and reaches the deadline.");
+    println!("      - A cable disconnect does not change the answers.");
+    println!();
+    println!("    The MTP service on the phone holds the session. The USB");
+    println!("    connection is not the cause, so a new cable connection does");
+    println!("    not help.");
+    println!();
+    println!("    Restart the MTP service on the phone:");
+    println!("      1. Open the USB notification.");
+    println!("      2. Choose Charging only, or No data transfer.");
+    println!("      3. Choose File transfer again.");
+    println!();
+    println!("    A restart of the phone also works, and takes longer.");
 }
 
 /// Gives a name for a response code.

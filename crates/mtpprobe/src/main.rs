@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use ptp_proto::{ObjectInfo, StorageInfo};
 use usb_freebsd::descriptor::{ConfigDescriptor, MtpInterface};
-use usb_freebsd::device::{Backend, OpenDevice};
+use usb_freebsd::device::{Backend, LinkSpeed, OpenDevice};
 
 use session::{response_name, Session};
 
@@ -532,6 +532,26 @@ fn bench() -> Result<(), String> {
     println!();
     println!("    The estimate is a guide, and not a standard. A rate near the");
     println!("    estimate means the link limits the copy, and the code does not.");
+
+    // A device at high speed, on a host that has a super speed device, points
+    // at the cable. A cable for a telephone often holds no super speed wires.
+    if speed == LinkSpeed::High {
+        let host_has_super = backend
+            .devices()
+            .iter()
+            .any(|d| d.speed() == LinkSpeed::Super || d.speed() == LinkSpeed::SuperPlus);
+        if host_has_super {
+            println!();
+            println!("    The link runs at high speed, which is USB 2.0. Another");
+            println!("    device on this host runs at super speed, so the host and");
+            println!("    the port can do more.");
+            println!();
+            println!("    A cable is the common cause. A cable for a telephone often");
+            println!("    holds no super speed wires, and the plug looks the same.");
+            println!("    Try a cable that came with a disk, or a cable that says");
+            println!("    USB 3.");
+        }
+    }
 
     if open.kernel_driver_active(iface.interface_number) {
         let _ = open.detach_kernel_driver(iface.interface_number);
