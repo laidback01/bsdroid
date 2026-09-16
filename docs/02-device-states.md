@@ -70,6 +70,56 @@ idea as an idea.
 The project holds a fixture for reading B. See
 `crates/usb-freebsd/tests/fixtures/s22_charge_mode_descriptor.hex`.
 
+## Image transfer mode works
+
+The phone has a mode named "Transferring images". The mode carries PTP. MTP is
+an extension of PTP, so the two modes share the interface class.
+
+Reading D, with the screen unlocked:
+
+| Item             | Value                           |
+| ---------------- | ------------------------------- |
+| `sys.usb.config` | `ptp,adb`                       |
+| `idProduct`      | 0x6866                          |
+| Interfaces       | 2                               |
+| MTP interface    | 0, endpoints 0x81, 0x01, 0x82   |
+| `OpenSession`    | 0x2001 OK                       |
+| `GetStorageIDs`  | 0x2001 OK, 1 storage, attempt 2 |
+| `GetStorageInfo` | 0x2001 OK, `Internal storage`   |
+
+The host read the storage, the capacity and the free space. `mtpprobe` needed
+no change for this mode.
+
+The first attempt gave an empty list, and the second attempt gave the storage.
+The cold start in `docs/01-cold-start.md` happens in this mode too. A host that
+asks one time reports "no files" for a mode that works.
+
+### A limit on this result
+
+The test read the storage. The test did not list an object. PTP normally gives
+the images, and MTP gives all the files. The capacity is the same in both
+modes, and the set of objects is possibly not the same.
+
+No test yet lists the objects. Do not tell a user that image mode gives the
+same files as file transfer mode.
+
+## Two fields separate file transfer from image mode
+
+The class, the subclass and the protocol are the same in both modes. Two other
+fields are not:
+
+| Field                      | File transfer | Image transfer |
+| -------------------------- | ------------- | -------------- |
+| `idProduct`                | 0x6860        | 0x6866         |
+| `iInterface` of interface 0 | 5             | 0              |
+
+`idProduct` lives in the device descriptor. `iInterface` lives in the
+configuration descriptor, and `Interface::string_index` holds the value.
+
+This finding narrows an earlier statement in this document. A host cannot learn
+the USB mode from the interface class. A host can learn something from other
+fields, on this phone. A test on one phone is not a rule for all phones.
+
 ## What this means for a fault report
 
 The host can state these facts:

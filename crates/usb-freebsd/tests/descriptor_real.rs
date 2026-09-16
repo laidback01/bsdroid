@@ -228,6 +228,72 @@ fn the_adb_interface_number_is_not_stable_across_captures() {
     assert_eq!(adb_number(&charge), 1, "capture B, charge and locked");
 }
 
+// --- Image transfer mode, which carries PTP ---
+
+#[test]
+fn the_ptp_fixture_agrees_with_its_own_header() {
+    let bytes = common::load("s22_ptp_mode_descriptor.hex");
+    assert_eq!(bytes.len(), 70);
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+    assert_eq!(cfg.total_length, 70);
+    assert_eq!(cfg.num_interfaces, 2);
+}
+
+/// Image transfer mode gives file access, and the interface looks like MTP.
+///
+/// MTP is an extension of PTP, so the two share the interface class. The host
+/// opens the same endpoints, and the host reads the storage.
+#[test]
+fn image_mode_gives_an_interface_that_matches_the_mtp_class() {
+    let bytes = common::load("s22_ptp_mode_descriptor.hex");
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+
+    let mtp = MtpInterface::find(&cfg).expect("image mode gives a still imaging interface");
+    assert_eq!(mtp.interface_number, 0);
+    assert_eq!(mtp.bulk_in, 0x81);
+    assert_eq!(mtp.bulk_out, 0x01);
+    assert_eq!(mtp.interrupt_in, Some(0x82));
+    assert_eq!(mtp.max_packet_size, 512);
+}
+
+/// The class fields do not separate the two modes.
+///
+/// A host that reads only the class, the subclass and the protocol cannot tell
+/// file transfer mode from image transfer mode.
+#[test]
+fn the_class_fields_are_the_same_in_file_transfer_and_image_modes() {
+    let transfer = common::load("s22_config_descriptor.hex");
+    let image = common::load("s22_ptp_mode_descriptor.hex");
+
+    let first = |bytes: &[u8]| -> (u8, u8, u8) {
+        let cfg = ConfigDescriptor::parse(bytes).unwrap();
+        let i = &cfg.interfaces[0];
+        (i.class, i.subclass, i.protocol)
+    };
+
+    assert_eq!(first(&transfer), (0x06, 0x01, 0x01));
+    assert_eq!(first(&image), (0x06, 0x01, 0x01));
+    assert_eq!(first(&transfer), first(&image));
+}
+
+/// The interface string index does separate the two modes.
+///
+/// The field is the one difference the configuration descriptor holds. The
+/// device descriptor also differs, and `idProduct` is 0x6860 for file transfer
+/// and 0x6866 for image transfer.
+#[test]
+fn the_interface_string_index_separates_file_transfer_from_image_mode() {
+    let transfer = common::load("s22_config_descriptor.hex");
+    let image = common::load("s22_ptp_mode_descriptor.hex");
+
+    let index =
+        |bytes: &[u8]| -> u8 { ConfigDescriptor::parse(bytes).unwrap().interfaces[0].string_index };
+
+    assert_eq!(index(&transfer), 5, "file transfer names the interface");
+    assert_eq!(index(&image), 0, "image transfer gives no name");
+    assert_ne!(index(&transfer), index(&image));
+}
+
 // --- Tests for damaged input ---
 //
 // Rule 3 in docs/00-why.md: a parse function never panics.

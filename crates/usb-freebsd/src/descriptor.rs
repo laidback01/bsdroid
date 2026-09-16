@@ -135,6 +135,13 @@ pub struct Interface {
     pub class: u8,
     pub subclass: u8,
     pub protocol: u8,
+    /// The index of the string that names the interface. A value of 0 means
+    /// that the device gives no name.
+    ///
+    /// The field separates two modes that share the class. A Samsung
+    /// SM-S901U gives 5 in file transfer mode, and 0 in image transfer mode.
+    /// See `docs/02-device-states.md`.
+    pub string_index: u8,
     pub endpoints: Vec<Endpoint>,
 }
 
@@ -226,6 +233,7 @@ impl ConfigDescriptor {
                         class: buf[pos + 5],
                         subclass: buf[pos + 6],
                         protocol: buf[pos + 7],
+                        string_index: buf[pos + 8],
                         endpoints: Vec::new(),
                     });
                 }
