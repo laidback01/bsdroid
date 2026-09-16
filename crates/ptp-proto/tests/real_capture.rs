@@ -135,6 +135,66 @@ fn a_built_container_parses_back_to_the_same_values() {
     assert_eq!(c.length as usize, bytes.len());
 }
 
+// --- The header of a large data phase ---
+
+#[test]
+fn a_header_parses_from_a_buffer_that_holds_only_the_header() {
+    let bytes = common::load("storage_info_data.hex");
+    let h = ptp_proto::Header::parse(&bytes[..12]).expect("12 bytes are enough");
+
+    assert_eq!(h.length, 74);
+    assert_eq!(h.kind, ContainerType::Data);
+    assert_eq!(h.code, OP_GET_STORAGE_INFO);
+    assert_eq!(h.transaction_id, 34);
+    assert_eq!(h.payload_len(), 62);
+}
+
+/// This test records the reason `Header` exists.
+///
+/// A device answers `GetObjectHandles` with a container that is larger than
+/// one USB transfer. The first transfer holds the header, and the length field
+/// is then larger than the buffer. `Container::parse` gives an error, and
+/// `Header::parse` gives the header.
+#[test]
+fn a_header_parses_when_the_container_is_larger_than_the_buffer() {
+    // A container that declares 200000 bytes, with only 64 bytes present.
+    let mut bytes = ptp_proto::build(ContainerType::Data, 0x1007, 9, &[0u8; 52]);
+    bytes[0..4].copy_from_slice(&200_000u32.to_le_bytes());
+
+    assert!(
+        matches!(
+            Container::parse(&bytes),
+            Err(ParseError::LengthMismatch { .. })
+        ),
+        "Container::parse needs the whole container"
+    );
+
+    let h = ptp_proto::Header::parse(&bytes).expect("the header must parse");
+    assert_eq!(h.length, 200_000);
+    assert_eq!(h.kind, ContainerType::Data);
+    assert_eq!(h.code, 0x1007);
+    assert_eq!(h.payload_len(), 199_988);
+}
+
+#[test]
+fn a_header_needs_twelve_bytes() {
+    for n in 0..12 {
+        let got = ptp_proto::Header::parse(&vec![0u8; n]);
+        assert!(
+            matches!(got, Err(ParseError::ShortHeader { .. })),
+            "{n} bytes must give ShortHeader, got {got:?}"
+        );
+    }
+}
+
+#[test]
+fn a_length_below_the_header_size_gives_no_payload() {
+    let mut bytes = common::load("response_ok.hex");
+    bytes[0] = 4;
+    let h = ptp_proto::Header::parse(&bytes).expect("the header still parses");
+    assert_eq!(h.payload_len(), 0, "the count must not go below zero");
+}
+
 // --- Tests for damaged input ---
 //
 // The defect that started this project was an endless loop. A parser must

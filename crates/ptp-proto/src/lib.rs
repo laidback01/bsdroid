@@ -135,6 +135,52 @@ pub struct Container<'a> {
     pub payload: &'a [u8],
 }
 
+/// The header of a container, with no payload.
+///
+/// A large data phase does not fit in one USB transfer. The first transfer
+/// holds the header and the start of the payload, and the length field says
+/// how many bytes follow. A caller reads the header first, and then reads the
+/// rest of the payload.
+///
+/// [`Container::parse`] needs the whole container, so [`Container::parse`]
+/// cannot read the first transfer of a large data phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Header {
+    /// The size of the whole container, in bytes, and the header counts.
+    pub length: u32,
+    /// The kind of the container.
+    pub kind: ContainerType,
+    /// An operation code, a response code, or an event code.
+    pub code: u16,
+    /// The transaction id.
+    pub transaction_id: u32,
+}
+
+impl Header {
+    /// Reads a header from the first 12 bytes of a buffer.
+    ///
+    /// The function does not compare the length field with the buffer size.
+    /// The buffer holds one transfer, and the container is often larger.
+    pub fn parse(buf: &[u8]) -> Result<Self, ParseError> {
+        if buf.len() < HEADER_LEN {
+            return Err(ParseError::ShortHeader { got: buf.len() });
+        }
+        Ok(Self {
+            length: u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
+            kind: ContainerType::from_wire(u16::from_le_bytes([buf[4], buf[5]]))?,
+            code: u16::from_le_bytes([buf[6], buf[7]]),
+            transaction_id: u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
+        })
+    }
+
+    /// The count of payload bytes the container holds.
+    ///
+    /// The function gives 0 if the length field is below the header size.
+    pub fn payload_len(&self) -> usize {
+        (self.length as usize).saturating_sub(HEADER_LEN)
+    }
+}
+
 impl<'a> Container<'a> {
     /// Reads a container from a byte buffer.
     ///
@@ -356,6 +402,137 @@ impl StorageInfo {
             free_space_in_objects: r.read_u32("free_space_in_objects")?,
             storage_description: r.read_string("storage_description")?,
             volume_identifier: r.read_string("volume_identifier")?,
+        })
+    }
+}
+
+/// Object format codes the project names.
+///
+/// A device uses many more codes. The list holds the codes the project needs
+/// to tell a folder from a file.
+pub mod format {
+    /// A folder. PTP calls a folder an association.
+    pub const ASSOCIATION: u16 = 0x3001;
+    /// A file the device does not classify.
+    pub const UNDEFINED: u16 = 0x3000;
+    /// A text file.
+    pub const TEXT: u16 = 0x3004;
+    /// An HTML file.
+    pub const HTML: u16 = 0x3005;
+    /// A JPEG image.
+    pub const EXIF_JPEG: u16 = 0x3801;
+    /// A PNG image.
+    pub const PNG: u16 = 0x380b;
+    /// An MP3 file.
+    pub const MP3: u16 = 0x3009;
+    /// An MP4 file.
+    pub const MP4: u16 = 0xb982;
+}
+
+/// Values for the third parameter of `GetObjectHandles`.
+///
+/// The parameter names an association, which is a folder. Two values are
+/// special, and the standards do not agree about which value does what.
+///
+/// A measurement on a Samsung SM-S901U, with 2059 objects on the storage:
+///
+/// | Value      | Objects the device returned |
+/// | ---------- | --------------------------- |
+/// | 0x00000000 | 2059                        |
+/// | 0xffffffff | 13                          |
+///
+/// The names below follow the measurement, and not a standard. Test a new
+/// device before you trust the names. See `docs/03-object-handles.md`.
+pub mod association {
+    /// The value that returned every object on the test device.
+    pub const EVERY_OBJECT: u32 = 0x0000_0000;
+    /// The value that returned the objects of the root folder on the test
+    /// device.
+    pub const ROOT_ONLY: u32 = 0xffff_ffff;
+}
+
+/// What a device reports about one object.
+///
+/// `GetObjectInfo` answers with this dataset. An object is a file or a folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectInfo {
+    /// The storage that holds the object.
+    pub storage_id: u32,
+    /// The format code. 0x3001 means a folder.
+    pub object_format: u16,
+    /// A device sets the field to stop a host from a write.
+    pub protection_status: u16,
+    /// The size of the object, in bytes.
+    pub compressed_size: u32,
+    /// The width of an image, in pixels. The field is 0 for a file.
+    pub image_pix_width: u32,
+    /// The height of an image, in pixels. The field is 0 for a file.
+    pub image_pix_height: u32,
+    /// The handle of the folder that holds the object.
+    pub parent_object: u32,
+    /// The kind of folder. The field is 0 for a file.
+    pub association_type: u16,
+    /// The name of the object.
+    pub filename: String,
+    /// The date the device made the object.
+    pub capture_date: String,
+    /// The date a writer last changed the object.
+    pub modification_date: String,
+}
+
+impl ObjectInfo {
+    /// Tells you if the object is a folder.
+    pub fn is_folder(&self) -> bool {
+        self.object_format == format::ASSOCIATION
+    }
+
+    /// Reads an `ObjectInfo` dataset from the payload of a data container.
+    ///
+    /// The dataset holds 15 scalar fields and 4 strings. A device can stop the
+    /// dataset after the third string, so the function gives an empty string
+    /// for a field the device does not send.
+    pub fn parse(payload: &[u8]) -> Result<Self, ParseError> {
+        let mut r = Reader::new(payload);
+
+        let storage_id = r.read_u32("storage_id")?;
+        let object_format = r.read_u16("object_format")?;
+        let protection_status = r.read_u16("protection_status")?;
+        let compressed_size = r.read_u32("compressed_size")?;
+
+        // The thumbnail fields. The project does not use them, and the fields
+        // must still move the cursor.
+        let _thumb_format = r.read_u16("thumb_format")?;
+        let _thumb_compressed_size = r.read_u32("thumb_compressed_size")?;
+        let _thumb_pix_width = r.read_u32("thumb_pix_width")?;
+        let _thumb_pix_height = r.read_u32("thumb_pix_height")?;
+
+        let image_pix_width = r.read_u32("image_pix_width")?;
+        let image_pix_height = r.read_u32("image_pix_height")?;
+        let _image_bit_depth = r.read_u32("image_bit_depth")?;
+
+        let parent_object = r.read_u32("parent_object")?;
+        let association_type = r.read_u16("association_type")?;
+        let _association_desc = r.read_u32("association_desc")?;
+        let _sequence_number = r.read_u32("sequence_number")?;
+
+        let filename = r.read_string("filename")?;
+
+        // A device can stop here. An absent string is not a fault.
+        let capture_date = r.read_string("capture_date").unwrap_or_default();
+        let modification_date = r.read_string("modification_date").unwrap_or_default();
+
+        Ok(Self {
+            storage_id,
+            object_format,
+            protection_status,
+            compressed_size,
+            image_pix_width,
+            image_pix_height,
+            parent_object,
+            association_type,
+            filename,
+            capture_date,
+            modification_date,
         })
     }
 }

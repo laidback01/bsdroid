@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use ptp_proto::{Container, ContainerType, ParseError};
+use ptp_proto::{Container, ContainerType, Header, ParseError};
 use usb_freebsd::device::{MtpChannels, UsbError};
 
 /// Operation codes the probe uses.
@@ -17,12 +17,49 @@ pub const OP_OPEN_SESSION: u16 = 0x1002;
 pub const OP_CLOSE_SESSION: u16 = 0x1003;
 pub const OP_GET_STORAGE_IDS: u16 = 0x1004;
 pub const OP_GET_STORAGE_INFO: u16 = 0x1005;
+pub const OP_GET_OBJECT_HANDLES: u16 = 0x1007;
+pub const OP_GET_OBJECT_INFO: u16 = 0x1008;
 
 /// Response code for success.
 pub const RESP_OK: u16 = 0x2001;
 
-/// The largest response the probe reads, in bytes.
-const READ_BUFFER: usize = 16 * 1024;
+/// The size of one read, in bytes.
+const READ_BUFFER_DEFAULT: usize = 64 * 1024;
+
+/// The smallest read buffer the code accepts.
+///
+/// A container header holds 12 bytes, and a read must hold a header.
+const READ_BUFFER_MIN: usize = 512;
+
+/// Gives the size of one read.
+///
+/// The environment variable `BSDROID_READ_BUFFER` changes the size. The
+/// variable is a test hook, and not a setting for a user.
+///
+/// A small buffer makes a device answer in many transfers. The hook lets a
+/// test cover the path that joins the transfers, with a payload that fits in
+/// one transfer at the normal size.
+fn read_buffer_size() -> usize {
+    match std::env::var("BSDROID_READ_BUFFER") {
+        Ok(v) => match v.parse::<usize>() {
+            Ok(n) if n >= READ_BUFFER_MIN => n,
+            _ => READ_BUFFER_DEFAULT,
+        },
+        Err(_) => READ_BUFFER_DEFAULT,
+    }
+}
+
+/// The largest data phase the probe accepts, in bytes.
+///
+/// A phone with many files answers `GetObjectHandles` with a large container.
+/// The limit stops a damaged length field from filling the memory of the host.
+const MAX_DATA_BYTES: usize = 64 * 1024 * 1024;
+
+/// The largest count of reads for one data phase.
+///
+/// Rule 1 says that a loop must not depend on the device for the end
+/// condition. See `docs/00-why.md`.
+const MAX_READ_ROUNDS: usize = 8192;
 
 /// What one operation did.
 #[derive(Debug, Clone)]
@@ -33,6 +70,11 @@ pub struct Outcome {
     pub data: Vec<u8>,
     /// The time the operation took.
     pub elapsed: Duration,
+    /// The count of reads the host did for the data phase.
+    ///
+    /// A count above 1 shows that the host joined many transfers into one
+    /// payload. The count is the evidence that the join works.
+    pub reads: usize,
 }
 
 impl Outcome {
@@ -61,6 +103,18 @@ pub enum SessionError {
         expected: ContainerType,
         got: ContainerType,
     },
+    /// The device declared a data phase larger than the host accepts.
+    TooLarge {
+        step: &'static str,
+        declared: usize,
+        limit: usize,
+    },
+    /// The device stopped before the end of the data phase.
+    Incomplete {
+        step: &'static str,
+        want: usize,
+        got: usize,
+    },
 }
 
 impl std::fmt::Display for SessionError {
@@ -75,6 +129,18 @@ impl std::fmt::Display for SessionError {
             } => write!(
                 f,
                 "{step}: the device sent {got:?}, and {expected:?} was due"
+            ),
+            Self::TooLarge {
+                step,
+                declared,
+                limit,
+            } => write!(
+                f,
+                "{step}: the device declared {declared} bytes, and the limit is {limit}"
+            ),
+            Self::Incomplete { step, want, got } => write!(
+                f,
+                "{step}: the device sent {got} bytes of the {want} it declared"
             ),
         }
     }
@@ -125,7 +191,9 @@ impl<'a> Session<'a> {
             .map_err(|source| SessionError::Usb { step, source })?;
 
         let mut data = Vec::new();
-        let mut buf = vec![0u8; READ_BUFFER];
+        let buf_size = read_buffer_size();
+        let mut buf = vec![0u8; buf_size];
+        let mut reads = 0usize;
 
         // Read the first container.
         let n = self
@@ -133,21 +201,38 @@ impl<'a> Session<'a> {
             .read
             .read(&mut buf, self.timeout)
             .map_err(|source| SessionError::Usb { step, source })?;
+        reads += 1;
 
+        // Read the header of the first container. `Container::parse` needs the
+        // whole container, and a large data phase does not fit in one
+        // transfer. `Header::parse` reads the 12 byte header alone.
         let first =
-            Container::parse(&buf[..n]).map_err(|source| SessionError::Parse { step, source })?;
+            Header::parse(&buf[..n]).map_err(|source| SessionError::Parse { step, source })?;
 
         let response = match first.kind {
             ContainerType::Data => {
-                data.extend_from_slice(first.payload);
-
-                // A device may send a payload larger than one transfer. The
-                // length field says how many bytes the whole container holds.
                 let declared = first.length as usize;
+                if declared > MAX_DATA_BYTES {
+                    return Err(SessionError::TooLarge {
+                        step,
+                        declared,
+                        limit: MAX_DATA_BYTES,
+                    });
+                }
+
+                // Keep the payload of the first transfer.
+                data.extend_from_slice(&buf[core::cmp::min(n, ptp_proto::HEADER_LEN)..n]);
                 let mut have = n;
-                // The loop has a bound, so a device cannot hold the host here.
-                for _ in 0..64 {
-                    if have >= declared {
+
+                // The loop needs one round for each transfer. The bound comes
+                // from the declared size, and the bound has a limit. A device
+                // cannot hold the host here.
+                let rounds = declared / buf_size + 4;
+                let rounds = core::cmp::min(rounds, MAX_READ_ROUNDS);
+
+                let mut complete = have >= declared;
+                for _ in 0..rounds {
+                    if complete {
                         break;
                     }
                     let more = self
@@ -155,11 +240,21 @@ impl<'a> Session<'a> {
                         .read
                         .read(&mut buf, self.timeout)
                         .map_err(|source| SessionError::Usb { step, source })?;
+                    reads += 1;
                     if more == 0 {
                         break;
                     }
                     data.extend_from_slice(&buf[..more]);
                     have += more;
+                    complete = have >= declared;
+                }
+
+                if !complete {
+                    return Err(SessionError::Incomplete {
+                        step,
+                        want: declared,
+                        got: have,
+                    });
                 }
 
                 // The response container follows the data container.
@@ -186,6 +281,7 @@ impl<'a> Session<'a> {
             response_code: response,
             data,
             elapsed: started.elapsed(),
+            reads,
         })
     }
 

@@ -11,7 +11,7 @@ mod session;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use ptp_proto::StorageInfo;
+use ptp_proto::{ObjectInfo, StorageInfo};
 use usb_freebsd::descriptor::{ConfigDescriptor, MtpInterface};
 use usb_freebsd::device::{Backend, OpenDevice};
 
@@ -43,6 +43,7 @@ fn main() -> ExitCode {
             reopen(cycles)
         }
         Some("coldstart") => coldstart(),
+        Some("objects") => objects(),
         Some("--help") | Some("-h") => {
             usage();
             return ExitCode::SUCCESS;
@@ -73,6 +74,7 @@ fn usage() {
     println!("  mtpprobe probe          Read the device one time. This is the default.");
     println!("  mtpprobe reopen [n]     Open and close the USB device n times.");
     println!("  mtpprobe coldstart      Reset the device, then measure the wait.");
+    println!("  mtpprobe objects        Count the objects, and read the root folder.");
     println!();
     println!("The reopen command repeats the pattern that simple-mtpfs uses.");
     println!("See docs/00-why.md.");
@@ -357,6 +359,106 @@ fn storage_ids_from(data: &[u8]) -> Vec<u32> {
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
+}
+
+/// Counts the objects, and reads the root folder.
+///
+/// The command answers two questions:
+///
+/// 1. How many objects does the device hold? The answer needs one large data
+///    phase, and the phase does not fit in one USB transfer.
+/// 2. What does the root folder hold?
+///
+/// The object count also separates file transfer mode from image mode. See
+/// `docs/02-device-states.md`.
+fn objects() -> Result<(), String> {
+    let backend = Backend::new().map_err(|e| e.to_string())?;
+    let (mut open, iface) = find_mtp(&backend, false)?;
+    if open.kernel_driver_active(iface.interface_number) {
+        let _ = open.detach_kernel_driver(iface.interface_number);
+    }
+    let channels = open
+        .open_mtp(&iface, BULK_BUFFER)
+        .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
+    let mut s = Session::new(channels, TIMEOUT);
+
+    s.open_session(1).map_err(|e| format!("{e}"))?;
+    let w = wait_for_storage(&mut s)?;
+    if w.ids.is_empty() {
+        report_no_storage(&w);
+        let _ = s.close_session();
+        return Err("the device reports 0 storages".to_string());
+    }
+    let storage = w.ids[0];
+    println!();
+    println!("storage {storage:#010x}");
+
+    // The third parameter of GetObjectHandles names an association, which is a
+    // folder. Two values are special, and the standards do not agree about
+    // which value does what. The probe sends both values and reports what the
+    // device did. The probe does not name the values.
+    for parent in [0x0000_0000u32, 0xffff_ffff_u32] {
+        println!();
+        println!("--- GetObjectHandles with parent {parent:#010x} ---");
+
+        let started = Instant::now();
+        let out = s
+            .operation(
+                "GetObjectHandles",
+                session::OP_GET_OBJECT_HANDLES,
+                &[storage, 0, parent],
+            )
+            .map_err(|e| format!("{e}"))?;
+
+        let handles: Vec<u32> = out
+            .data
+            .get(4..)
+            .unwrap_or(&[])
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        println!(
+            "    {:>6} ms   {} objects   {} data bytes   {} read(s)",
+            started.elapsed().as_millis(),
+            handles.len(),
+            out.data.len(),
+            out.reads
+        );
+
+        // Read the information for the first objects. The names tell a reader
+        // what the value means, and a guess does not.
+        let mut folders = 0;
+        let mut files = 0;
+        let show = core::cmp::min(handles.len(), 12);
+        println!("    the first {show} objects:");
+
+        for h in handles.iter().take(show) {
+            let info = s
+                .operation("GetObjectInfo", session::OP_GET_OBJECT_INFO, &[*h])
+                .map_err(|e| format!("{e}"))?;
+            match ObjectInfo::parse(&info.data) {
+                Ok(o) => {
+                    let kind = if o.is_folder() {
+                        folders += 1;
+                        "folder"
+                    } else {
+                        files += 1;
+                        "file  "
+                    };
+                    println!(
+                        "      {kind}  parent {:#010x}  {:>11}  {}",
+                        o.parent_object, o.compressed_size, o.filename
+                    );
+                }
+                Err(e) => println!("      the payload does not parse: {e}"),
+            }
+        }
+        println!("      of the first {show}: {folders} folder(s), {files} file(s)");
+    }
+
+    let _ = s.close_session();
+    Ok(())
 }
 
 /// Tells you if any device gives an MTP interface.
