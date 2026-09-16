@@ -44,6 +44,7 @@ fn main() -> ExitCode {
         }
         Some("coldstart") => coldstart(),
         Some("objects") => objects(),
+        Some("get") => get(args.get(1).and_then(|s| parse_handle(s))),
         Some("--help") | Some("-h") => {
             usage();
             return ExitCode::SUCCESS;
@@ -75,6 +76,10 @@ fn usage() {
     println!("  mtpprobe reopen [n]     Open and close the USB device n times.");
     println!("  mtpprobe coldstart      Reset the device, then measure the wait.");
     println!("  mtpprobe objects        Count the objects, and read the root folder.");
+    println!("  mtpprobe get [handle]   Copy one object to the current folder.");
+    println!();
+    println!("The get command takes a handle in decimal or in hexadecimal, such");
+    println!("as 0x1a. The command takes the smallest file if you give no handle.");
     println!();
     println!("The reopen command repeats the pattern that simple-mtpfs uses.");
     println!("See docs/00-why.md.");
@@ -447,7 +452,7 @@ fn objects() -> Result<(), String> {
                         "file  "
                     };
                     println!(
-                        "      {kind}  parent {:#010x}  {:>11}  {}",
+                        "      {kind}  {h:#010x}  parent {:#010x}  {:>11}  {}",
                         o.parent_object, o.compressed_size, o.filename
                     );
                 }
@@ -458,6 +463,177 @@ fn objects() -> Result<(), String> {
     }
 
     let _ = s.close_session();
+    Ok(())
+}
+
+/// Reads a handle from the command line. The text is decimal or hexadecimal.
+fn parse_handle(s: &str) -> Option<u32> {
+    match s.strip_prefix("0x") {
+        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+        None => s.parse::<u32>().ok(),
+    }
+}
+
+/// The count of objects the command reads to find a small file.
+const SEARCH_LIMIT: usize = 60;
+
+/// Copies one object from the device to the current folder.
+///
+/// The command writes the payload to the file as the payload arrives. The host
+/// does not hold the object in memory, so a large file needs no large memory.
+fn get(handle: Option<u32>) -> Result<(), String> {
+    let backend = Backend::new().map_err(|e| e.to_string())?;
+    let (mut open, iface) = find_mtp(&backend, false)?;
+    if open.kernel_driver_active(iface.interface_number) {
+        let _ = open.detach_kernel_driver(iface.interface_number);
+    }
+    let channels = open
+        .open_mtp(&iface, BULK_BUFFER)
+        .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
+    let mut s = Session::new(channels, TIMEOUT);
+
+    s.open_session(1).map_err(|e| format!("{e}"))?;
+    let w = wait_for_storage(&mut s)?;
+    if w.ids.is_empty() {
+        report_no_storage(&w);
+        let _ = s.close_session();
+        return Err("the device reports 0 storages".to_string());
+    }
+    let storage = w.ids[0];
+
+    // Choose the object.
+    let (target, info) = match handle {
+        Some(h) => {
+            let out = s
+                .operation("GetObjectInfo", session::OP_GET_OBJECT_INFO, &[h])
+                .map_err(|e| format!("{e}"))?;
+            let info = ObjectInfo::parse(&out.data).map_err(|e| format!("{e}"))?;
+            (h, info)
+        }
+        None => {
+            println!();
+            println!("No handle given, so the command looks for a small file.");
+            let list = s
+                .operation(
+                    "GetObjectHandles",
+                    session::OP_GET_OBJECT_HANDLES,
+                    &[storage, 0, ptp_proto::association::EVERY_OBJECT],
+                )
+                .map_err(|e| format!("{e}"))?;
+            let handles: Vec<u32> = list
+                .data
+                .get(4..)
+                .unwrap_or(&[])
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+
+            let mut best: Option<(u32, ObjectInfo)> = None;
+            for h in handles.iter().take(SEARCH_LIMIT) {
+                let out = s
+                    .operation("GetObjectInfo", session::OP_GET_OBJECT_INFO, &[*h])
+                    .map_err(|e| format!("{e}"))?;
+                let info = match ObjectInfo::parse(&out.data) {
+                    Ok(i) => i,
+                    Err(_) => continue,
+                };
+                if info.is_folder() || info.compressed_size == 0 {
+                    continue;
+                }
+                let better = match &best {
+                    Some((_, b)) => info.compressed_size < b.compressed_size,
+                    None => true,
+                };
+                if better {
+                    best = Some((*h, info));
+                }
+            }
+            best.ok_or_else(|| format!("no file found in the first {SEARCH_LIMIT} objects"))?
+        }
+    };
+
+    if info.is_folder() {
+        let _ = s.close_session();
+        return Err(format!("object {target:#010x} is a folder, and not a file"));
+    }
+
+    println!();
+    println!("object {target:#010x}");
+    println!("  name:   {}", info.filename);
+    println!("  size:   {} bytes", info.compressed_size);
+    println!("  format: {:#06x}", info.object_format);
+    println!("  parent: {:#010x}", info.parent_object);
+
+    // Write to the current folder, under the name the device gives. A name
+    // from a device can hold a path separator, so the code takes the last part.
+    let safe = info
+        .filename
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .ok_or_else(|| format!("the device gives an unusable name: {}", info.filename))?;
+    let path = std::path::Path::new(safe);
+
+    println!();
+    println!("--- GetObject ---");
+    let file = std::fs::File::create(path)
+        .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    let out = s
+        .operation_stream("GetObject", session::OP_GET_OBJECT, &[target], &mut writer)
+        .map_err(|e| format!("{e}"))?;
+
+    use std::io::Write as _;
+    writer
+        .flush()
+        .map_err(|e| format!("cannot finish the write: {e}"))?;
+    drop(writer);
+
+    if !out.is_ok() {
+        let _ = s.close_session();
+        return Err(format!(
+            "GetObject gave {:#06x} {}",
+            out.response_code,
+            response_name(out.response_code)
+        ));
+    }
+
+    let secs = out.elapsed.as_secs_f64();
+    let rate = if secs > 0.0 {
+        out.bytes as f64 / secs / (1024.0 * 1024.0)
+    } else {
+        0.0
+    };
+
+    println!(
+        "    {:>6} ms   {} bytes   {} read(s)   {:.1} MiB/s",
+        out.elapsed.as_millis(),
+        out.bytes,
+        out.reads,
+        rate
+    );
+    println!("    wrote {}", path.display());
+
+    // Check the size against the size the device reported.
+    let on_disk = std::fs::metadata(path)
+        .map_err(|e| format!("cannot read the size of {}: {e}", path.display()))?
+        .len();
+
+    println!();
+    println!("--- Check ---");
+    println!("    ObjectInfo says  {} bytes", info.compressed_size);
+    println!("    the file holds   {on_disk} bytes");
+
+    let _ = s.close_session();
+
+    if on_disk != u64::from(info.compressed_size) {
+        return Err(format!(
+            "the sizes disagree: the device said {} and the file holds {on_disk}",
+            info.compressed_size
+        ));
+    }
+    println!("    the two sizes agree");
     Ok(())
 }
 

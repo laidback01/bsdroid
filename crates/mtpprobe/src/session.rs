@@ -4,6 +4,7 @@
 //! Each step has a deadline. A step that passes the deadline gives an error,
 //! and the program stops. See rule 2 in `docs/00-why.md`.
 
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use ptp_proto::{Container, ContainerType, Header, ParseError};
@@ -19,6 +20,7 @@ pub const OP_GET_STORAGE_IDS: u16 = 0x1004;
 pub const OP_GET_STORAGE_INFO: u16 = 0x1005;
 pub const OP_GET_OBJECT_HANDLES: u16 = 0x1007;
 pub const OP_GET_OBJECT_INFO: u16 = 0x1008;
+pub const OP_GET_OBJECT: u16 = 0x1009;
 
 /// Response code for success.
 pub const RESP_OK: u16 = 0x2001;
@@ -84,6 +86,26 @@ impl Outcome {
     }
 }
 
+/// What one streamed operation did.
+#[derive(Debug, Clone)]
+pub struct StreamOutcome {
+    /// The response code the device gave.
+    pub response_code: u16,
+    /// The count of payload bytes the host wrote.
+    pub bytes: u64,
+    /// The time the operation took.
+    pub elapsed: Duration,
+    /// The count of reads the host did for the data phase.
+    pub reads: usize,
+}
+
+impl StreamOutcome {
+    /// Tells you if the device reported success.
+    pub fn is_ok(&self) -> bool {
+        self.response_code == RESP_OK
+    }
+}
+
 /// A fault in an operation.
 #[derive(Debug)]
 pub enum SessionError {
@@ -115,6 +137,8 @@ pub enum SessionError {
         want: usize,
         got: usize,
     },
+    /// The host cannot write the payload where the caller asked.
+    Write { step: &'static str, message: String },
 }
 
 impl std::fmt::Display for SessionError {
@@ -142,6 +166,9 @@ impl std::fmt::Display for SessionError {
                 f,
                 "{step}: the device sent {got} bytes of the {want} it declared"
             ),
+            Self::Write { step, message } => {
+                write!(f, "{step}: cannot write the payload: {message}")
+            }
         }
     }
 }
@@ -180,6 +207,28 @@ impl<'a> Session<'a> {
         code: u16,
         params: &[u32],
     ) -> Result<Outcome, SessionError> {
+        let mut data = Vec::new();
+        let s = self.operation_stream(step, code, params, &mut data)?;
+        Ok(Outcome {
+            response_code: s.response_code,
+            data,
+            elapsed: s.elapsed,
+            reads: s.reads,
+        })
+    }
+
+    /// Does one operation, and writes the data phase to a writer.
+    ///
+    /// The function does not hold the payload in memory. A file of 10 GB
+    /// therefore needs no memory of 10 GB. `operation` calls this function with
+    /// a vector, so the two functions share one path.
+    pub fn operation_stream<W: Write>(
+        &mut self,
+        step: &'static str,
+        code: u16,
+        params: &[u32],
+        out: &mut W,
+    ) -> Result<StreamOutcome, SessionError> {
         let started = Instant::now();
         let tid = self.transaction;
         self.transaction = self.transaction.wrapping_add(1);
@@ -190,10 +239,10 @@ impl<'a> Session<'a> {
             .write(&command, self.timeout)
             .map_err(|source| SessionError::Usb { step, source })?;
 
-        let mut data = Vec::new();
         let buf_size = read_buffer_size();
         let mut buf = vec![0u8; buf_size];
         let mut reads = 0usize;
+        let mut payload_bytes = 0u64;
 
         // Read the first container.
         let n = self
@@ -220,8 +269,14 @@ impl<'a> Session<'a> {
                     });
                 }
 
-                // Keep the payload of the first transfer.
-                data.extend_from_slice(&buf[core::cmp::min(n, ptp_proto::HEADER_LEN)..n]);
+                // Write the payload of the first transfer.
+                let start = core::cmp::min(n, ptp_proto::HEADER_LEN);
+                out.write_all(&buf[start..n])
+                    .map_err(|e| SessionError::Write {
+                        step,
+                        message: e.to_string(),
+                    })?;
+                payload_bytes += (n - start) as u64;
                 let mut have = n;
 
                 // The loop needs one round for each transfer. The bound comes
@@ -244,7 +299,12 @@ impl<'a> Session<'a> {
                     if more == 0 {
                         break;
                     }
-                    data.extend_from_slice(&buf[..more]);
+                    out.write_all(&buf[..more])
+                        .map_err(|e| SessionError::Write {
+                            step,
+                            message: e.to_string(),
+                        })?;
+                    payload_bytes += more as u64;
                     have += more;
                     complete = have >= declared;
                 }
@@ -277,9 +337,9 @@ impl<'a> Session<'a> {
             }
         };
 
-        Ok(Outcome {
+        Ok(StreamOutcome {
             response_code: response,
-            data,
+            bytes: payload_bytes,
             elapsed: started.elapsed(),
             reads,
         })
