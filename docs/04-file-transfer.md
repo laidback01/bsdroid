@@ -74,6 +74,59 @@ faster link.
 
 Do not compare a rate from this document with a rate from a different host.
 
+## A stopped transfer can hold a device
+
+A benchmark found a fault in this project. The host stopped a data phase in the
+middle, and the device then answered no command.
+
+### The fault
+
+The code had a limit of 8192 reads for one data phase. A read of 4 KiB
+therefore stopped at 33554432 bytes, which is 32 MiB. A video of 39 MB failed,
+and the failure message named the count:
+
+```
+GetObject: the device sent 33558528 bytes of the 39836906 it declared
+```
+
+The limit came from a number somebody chose. The limit now comes from the other
+limits, so the limit cannot stop a transfer that the device can finish.
+
+### What the fault did to the device
+
+The device still held 6281974 bytes for the host. The host then sent a new
+command, and the write to the device did not finish. Every later command
+failed.
+
+A user sees a phone that works with no program. The cause is the earlier
+program, and not the phone.
+
+### What repairs the device
+
+The project tried four repairs, in this order:
+
+| Repair                            | Result                                |
+| --------------------------------- | ------------------------------------- |
+| Read and drop the rest             | dropped 6281974 bytes                 |
+| Clear the halt on both endpoints   | the endpoints work again              |
+| Device reset request, 0x66         | the device answers a command again    |
+| `CloseSession` and `OpenSession`   | the device still reports a session     |
+
+The device reset request is the important one. The still imaging class defines
+request 0x66, and the request needs no root. Before the request, every command
+reached the deadline. After the request, a command took 5 milliseconds.
+
+The repairs run at the start of each session, so a user does not meet the fault
+of an earlier program.
+
+### What the repairs do not fix
+
+The device kept one session open, and the device refused to close the session.
+A user then needs to disconnect the cable and connect the cable again.
+
+A program must therefore not stop in the middle of a data phase. The repairs
+reduce the damage, and the repairs do not remove the damage.
+
 ## A name from a device is not a path
 
 A device gives the name of an object. A name can hold a path separator, and a

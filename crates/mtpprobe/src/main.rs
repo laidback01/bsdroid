@@ -45,6 +45,7 @@ fn main() -> ExitCode {
         Some("coldstart") => coldstart(),
         Some("objects") => objects(),
         Some("get") => get(args.get(1).and_then(|s| parse_handle(s))),
+        Some("bench") => bench(),
         Some("--help") | Some("-h") => {
             usage();
             return ExitCode::SUCCESS;
@@ -77,6 +78,7 @@ fn usage() {
     println!("  mtpprobe coldstart      Reset the device, then measure the wait.");
     println!("  mtpprobe objects        Count the objects, and read the root folder.");
     println!("  mtpprobe get [handle]   Copy one object to the current folder.");
+    println!("  mtpprobe bench          Measure the rate of the USB link.");
     println!();
     println!("The get command takes a handle in decimal or in hexadecimal, such");
     println!("as 0x1a. The command takes the smallest file if you give no handle.");
@@ -196,6 +198,13 @@ fn probe() -> Result<(), String> {
         let _ = open.detach_kernel_driver(iface.interface_number);
     }
 
+    // Put the protocol state of the device back to the start. A program that
+    // stopped in the middle of a data phase leaves a device that answers no
+    // command, and this request repairs that state.
+    if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
+        println!("    the device reset request failed: {e}");
+    }
+
     let channels = open
         .open_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
@@ -203,7 +212,21 @@ fn probe() -> Result<(), String> {
 
     println!();
     println!("--- Session 1 ---");
-    step(&mut s, "OpenSession", session::OP_OPEN_SESSION, &[1])?;
+    let o = s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
+    println!(
+        "    {:<16} {:>6} ms   {:#06x} {}",
+        "OpenSession",
+        o.elapsed.as_millis(),
+        o.response_code,
+        response_name(o.response_code)
+    );
+    if !o.is_ok() {
+        return Err(format!(
+            "OpenSession gave {:#06x} {}",
+            o.response_code,
+            response_name(o.response_code)
+        ));
+    }
 
     let w = wait_for_storage(&mut s)?;
     println!(
@@ -304,7 +327,7 @@ fn reopen(cycles: u32) -> Result<(), String> {
                 .map_err(|e| format!("cannot open the endpoints: {e}"))?;
             let mut s = Session::new(channels, TIMEOUT);
 
-            s.open_session(1).map_err(|e| format!("{e}"))?;
+            s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
             let ids = s
                 .operation("GetStorageIDs", session::OP_GET_STORAGE_IDS, &[])
                 .map_err(|e| format!("{e}"))?;
@@ -382,12 +405,19 @@ fn objects() -> Result<(), String> {
     if open.kernel_driver_active(iface.interface_number) {
         let _ = open.detach_kernel_driver(iface.interface_number);
     }
+    // Put the protocol state of the device back to the start. A program that
+    // stopped in the middle of a data phase leaves a device that answers no
+    // command, and this request repairs that state.
+    if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
+        println!("    the device reset request failed: {e}");
+    }
+
     let channels = open
         .open_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
     let mut s = Session::new(channels, TIMEOUT);
 
-    s.open_session(1).map_err(|e| format!("{e}"))?;
+    s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
     let w = wait_for_storage(&mut s)?;
     if w.ids.is_empty() {
         report_no_storage(&w);
@@ -466,6 +496,231 @@ fn objects() -> Result<(), String> {
     Ok(())
 }
 
+/// The read sizes the benchmark uses, in bytes.
+const BENCH_READ_SIZES: [usize; 4] = [4 * 1024, 16 * 1024, 64 * 1024, 256 * 1024];
+
+/// The count of times the benchmark reads each file.
+const BENCH_ROUNDS: usize = 3;
+
+/// The count of objects the benchmark reads to find the test files.
+const BENCH_SEARCH: usize = 120;
+
+/// Measures the rate of the USB link.
+///
+/// The benchmark reads a file from the device, and writes the bytes nowhere.
+/// A write to a disk would measure the disk, and the benchmark measures the
+/// USB link.
+///
+/// The benchmark uses the files of the device, because the project cannot ship
+/// a file. The sizes are therefore not the same on two phones. The report
+/// gives the size of each file, so a reader can compare two reports.
+fn bench() -> Result<(), String> {
+    let backend = Backend::new().map_err(|e| e.to_string())?;
+    let (mut open, iface) = find_mtp(&backend, false)?;
+
+    let speed = open.speed();
+    println!();
+    println!("--- The link ---");
+    println!("    speed: {speed}");
+    match speed.practical_bytes_per_second() {
+        Some(b) => println!(
+            "    a bulk transfer on this link reaches about {:.0} MiB/s",
+            b as f64 / (1024.0 * 1024.0)
+        ),
+        None => println!("    the project has no estimate for this speed"),
+    }
+    println!();
+    println!("    The estimate is a guide, and not a standard. A rate near the");
+    println!("    estimate means the link limits the copy, and the code does not.");
+
+    if open.kernel_driver_active(iface.interface_number) {
+        let _ = open.detach_kernel_driver(iface.interface_number);
+    }
+    // Put the protocol state of the device back to the start. A program that
+    // stopped in the middle of a data phase leaves a device that answers no
+    // command, and this request repairs that state.
+    if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
+        println!("    the device reset request failed: {e}");
+    }
+
+    let channels = open
+        .open_mtp(&iface, BULK_BUFFER)
+        .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
+    let mut s = Session::new(channels, TIMEOUT);
+
+    s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
+    let w = wait_for_storage(&mut s)?;
+    if w.ids.is_empty() {
+        report_no_storage(&w);
+        let _ = s.close_session();
+        return Err("the device reports 0 storages".to_string());
+    }
+    let storage = w.ids[0];
+
+    // Find files across a range of sizes.
+    println!();
+    println!("--- The test files ---");
+    let list = s
+        .operation(
+            "GetObjectHandles",
+            session::OP_GET_OBJECT_HANDLES,
+            &[storage, 0, ptp_proto::association::EVERY_OBJECT],
+        )
+        .map_err(|e| format!("{e}"))?;
+    let handles: Vec<u32> = list
+        .data
+        .get(4..)
+        .unwrap_or(&[])
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+
+    let mut files: Vec<(u32, u32, String)> = Vec::new();
+    for h in handles.iter().take(BENCH_SEARCH) {
+        let out = s
+            .operation("GetObjectInfo", session::OP_GET_OBJECT_INFO, &[*h])
+            .map_err(|e| format!("{e}"))?;
+        if let Ok(i) = ObjectInfo::parse(&out.data) {
+            if !i.is_folder() && i.compressed_size > 0 {
+                files.push((*h, i.compressed_size, i.filename));
+            }
+        }
+    }
+    if files.is_empty() {
+        let _ = s.close_session();
+        return Err(format!(
+            "no file found in the first {BENCH_SEARCH} objects. The benchmark \
+             needs a file on the device."
+        ));
+    }
+    files.sort_by_key(|f| f.1);
+
+    // Take the smallest, a middle one, and the largest.
+    let mut chosen: Vec<(u32, u32, String)> = Vec::new();
+    for idx in [0usize, files.len() / 2, files.len() - 1] {
+        let f = &files[idx];
+        if !chosen.iter().any(|c| c.0 == f.0) {
+            chosen.push(f.clone());
+        }
+    }
+    for (_, size, name) in &chosen {
+        println!("    {:>12} bytes   {}", size, short_name(name));
+    }
+    println!(
+        "    chosen from {} files in the first {BENCH_SEARCH} objects",
+        files.len()
+    );
+
+    // Run the benchmark.
+    println!();
+    println!("--- The rates ---");
+    println!("    Each row reads the whole file {BENCH_ROUNDS} times, and gives the best.");
+    println!("    The host writes the bytes nowhere, so the disk does not count.");
+    println!();
+    println!(
+        "    {:>12}  {:>9}  {:>7}  {:>10}  {:>7}",
+        "size", "read size", "reads", "best", "of est."
+    );
+
+    let practical = speed.practical_bytes_per_second();
+
+    for (handle, size, _) in &chosen {
+        for read_size in BENCH_READ_SIZES {
+            std::env::set_var("BSDROID_READ_BUFFER", read_size.to_string());
+
+            let mut best_rate = 0.0f64;
+            let mut reads = 0usize;
+            let mut failed = None;
+
+            for _ in 0..BENCH_ROUNDS {
+                let mut sink = std::io::sink();
+                match s.operation_stream("GetObject", session::OP_GET_OBJECT, &[*handle], &mut sink)
+                {
+                    Ok(o) => {
+                        let secs = o.elapsed.as_secs_f64();
+                        let rate = if secs > 0.0 {
+                            o.bytes as f64 / secs
+                        } else {
+                            0.0
+                        };
+                        if rate > best_rate {
+                            best_rate = rate;
+                            reads = o.reads;
+                        }
+                    }
+                    Err(e) => {
+                        // A failed data phase leaves the device with bytes to
+                        // send. The next row must start with a clean channel.
+                        let dropped = s.drain();
+                        failed = Some(match dropped {
+                            0 => format!("{e}"),
+                            n => format!("{e} (dropped {n} bytes to recover)"),
+                        });
+                        break;
+                    }
+                }
+            }
+
+            match failed {
+                Some(e) => println!("    {size:>12}  {:>9}  {:>7}  {e}", human(read_size), "-"),
+                None => {
+                    let pct = match practical {
+                        Some(p) => format!("{:.0}%", best_rate / p as f64 * 100.0),
+                        None => "-".to_string(),
+                    };
+                    println!(
+                        "    {size:>12}  {:>9}  {reads:>7}  {:>7.1} MiB/s  {pct:>7}",
+                        human(read_size),
+                        best_rate / (1024.0 * 1024.0)
+                    );
+                }
+            }
+        }
+    }
+    std::env::remove_var("BSDROID_READ_BUFFER");
+
+    println!();
+    println!("--- How to read this ---");
+    println!("    A small file gives a low rate. The cost of one operation does");
+    println!("    not change with the size, so the cost counts for more.");
+    println!();
+    println!("    A larger read size gives a higher rate, up to a limit. The");
+    println!("    limit is the link, or the device.");
+    println!();
+    println!("    A rate far under the estimate, with a large file and a large");
+    println!("    read size, points at the hub chain or the cable.");
+
+    let _ = s.close_session();
+    Ok(())
+}
+
+/// Shortens a name for a report, so a report holds no long private name.
+fn short_name(name: &str) -> String {
+    if name.len() <= 24 {
+        return name.to_string();
+    }
+    let tail: String = name
+        .chars()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("...{tail}")
+}
+
+/// Writes a byte count for a person to read.
+fn human(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{} MiB", bytes / (1024 * 1024))
+    } else if bytes >= 1024 {
+        format!("{} KiB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// Reads a handle from the command line. The text is decimal or hexadecimal.
 fn parse_handle(s: &str) -> Option<u32> {
     match s.strip_prefix("0x") {
@@ -487,12 +742,19 @@ fn get(handle: Option<u32>) -> Result<(), String> {
     if open.kernel_driver_active(iface.interface_number) {
         let _ = open.detach_kernel_driver(iface.interface_number);
     }
+    // Put the protocol state of the device back to the start. A program that
+    // stopped in the middle of a data phase leaves a device that answers no
+    // command, and this request repairs that state.
+    if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
+        println!("    the device reset request failed: {e}");
+    }
+
     let channels = open
         .open_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
     let mut s = Session::new(channels, TIMEOUT);
 
-    s.open_session(1).map_err(|e| format!("{e}"))?;
+    s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
     let w = wait_for_storage(&mut s)?;
     if w.ids.is_empty() {
         report_no_storage(&w);
@@ -815,7 +1077,7 @@ fn coldstart() -> Result<(), String> {
         .open_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the endpoints: {e}"))?;
     let mut s = Session::new(channels, TIMEOUT);
-    s.open_session(1).map_err(|e| format!("{e}"))?;
+    s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
 
     let w = wait_for_storage(&mut s)?;
     let _ = s.close_session();

@@ -37,6 +37,11 @@ const REQUEST_TYPE_IN_STANDARD_DEVICE: u8 = 0x80;
 /// high byte of `wValue`.
 const DESCRIPTOR_TYPE_CONFIGURATION: u16 = 0x0200;
 
+/// The device reset request of the still imaging class.
+///
+/// The request puts the protocol state of the device back to the start.
+const PTP_DEVICE_RESET_REQUEST: u8 = 0x66;
+
 /// What a transfer did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStatus {
@@ -97,6 +102,100 @@ impl fmt::Display for TransferStatus {
             Self::Other(v) => return write!(f, "unknown status {v}"),
         };
         f.write_str(s)
+    }
+}
+
+/// The speed of the USB link to a device.
+///
+/// The speed limits the rate of a file copy. A host that reports a rate must
+/// also report the speed, because a rate has no meaning without the speed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkSpeed {
+    /// The library gives no speed.
+    Unknown,
+    /// USB 1.0 low speed, 1.5 Mbit each second.
+    Low,
+    /// USB 1.1 full speed, 12 Mbit each second.
+    Full,
+    /// USB 2.0 high speed, 480 Mbit each second.
+    High,
+    /// A speed that changes.
+    Variable,
+    /// USB 3.0 super speed, 5 Gbit each second.
+    Super,
+    /// USB 3.1 super speed plus, 10 Gbit each second.
+    SuperPlus,
+    /// A value the library gives that this code does not name.
+    Other(u8),
+}
+
+impl LinkSpeed {
+    /// Converts a `libusb20` speed value.
+    pub fn from_wire(v: u8) -> Self {
+        match v as u32 {
+            sys::LIBUSB20_SPEED_UNKNOWN => Self::Unknown,
+            sys::LIBUSB20_SPEED_LOW => Self::Low,
+            sys::LIBUSB20_SPEED_FULL => Self::Full,
+            sys::LIBUSB20_SPEED_HIGH => Self::High,
+            sys::LIBUSB20_SPEED_VARIABLE => Self::Variable,
+            sys::LIBUSB20_SPEED_SUPER => Self::Super,
+            sys::LIBUSB20_SPEED_SUPER_PLUS => Self::SuperPlus,
+            _ => Self::Other(v),
+        }
+    }
+
+    /// The rate of the link, in bits each second.
+    ///
+    /// The value is the rate of the signal. A file copy never reaches the
+    /// value, because the protocol needs part of the time.
+    pub fn bits_per_second(self) -> Option<u64> {
+        match self {
+            Self::Low => Some(1_500_000),
+            Self::Full => Some(12_000_000),
+            Self::High => Some(480_000_000),
+            Self::Super => Some(5_000_000_000),
+            Self::SuperPlus => Some(10_000_000_000),
+            Self::Unknown | Self::Variable | Self::Other(_) => None,
+        }
+    }
+
+    /// An estimate of the rate a bulk transfer reaches, in bytes each second.
+    ///
+    /// The estimate comes from common measurements, and not from a standard.
+    /// A host uses the estimate to tell a user whether the link limits the
+    /// copy, or whether something else does.
+    pub fn practical_bytes_per_second(self) -> Option<u64> {
+        match self {
+            Self::Low => Some(150_000),
+            Self::Full => Some(1_000_000),
+            Self::High => Some(42_000_000),
+            Self::Super => Some(400_000_000),
+            Self::SuperPlus => Some(900_000_000),
+            Self::Unknown | Self::Variable | Self::Other(_) => None,
+        }
+    }
+
+    /// A name for a person to read.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Low => "low, USB 1.0",
+            Self::Full => "full, USB 1.1",
+            Self::High => "high, USB 2.0",
+            Self::Variable => "variable",
+            Self::Super => "super, USB 3.0",
+            Self::SuperPlus => "super plus, USB 3.1",
+            Self::Other(_) => "not named here",
+        }
+    }
+}
+
+impl fmt::Display for LinkSpeed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.bits_per_second() {
+            Some(b) => write!(f, "{} ({} Mbit each second)", self.name(), b / 1_000_000),
+            None => f.write_str(self.name()),
+        }
     }
 }
 
@@ -260,6 +359,12 @@ impl<'a> DeviceHandle<'a> {
         unsafe { sys::libusb20_dev_get_address(self.dev) }
     }
 
+    /// The speed of the link to the device.
+    pub fn speed(&self) -> LinkSpeed {
+        // SAFETY: `self.dev` is a valid device that the backend owns.
+        LinkSpeed::from_wire(unsafe { sys::libusb20_dev_get_speed(self.dev) })
+    }
+
     /// The vendor and product identifiers of the device.
     pub fn ids(&self) -> (u16, u16) {
         // SAFETY: the library gives a pointer to a decoded descriptor that the
@@ -297,6 +402,12 @@ pub struct OpenDevice<'a> {
 }
 
 impl<'a> OpenDevice<'a> {
+    /// The speed of the link to the device.
+    pub fn speed(&self) -> LinkSpeed {
+        // SAFETY: `self.dev` is open.
+        LinkSpeed::from_wire(unsafe { sys::libusb20_dev_get_speed(self.dev) })
+    }
+
     /// Reads the raw configuration descriptor with a control request.
     ///
     /// The function gives the bytes to the caller. The `descriptor` module then
@@ -340,6 +451,61 @@ impl<'a> OpenDevice<'a> {
         let raw = self.config_descriptor_raw(timeout)?;
         let cfg = ConfigDescriptor::parse(&raw)?;
         Ok(MtpInterface::find(&cfg)?)
+    }
+
+    /// Sends a class request to an interface, with no data.
+    ///
+    /// The request type is 0x21, which means host to device, class, and
+    /// interface.
+    pub fn class_request_out(
+        &mut self,
+        request: u8,
+        value: u16,
+        interface: u8,
+        timeout: Duration,
+    ) -> Result<(), UsbError> {
+        let ms = timeout_millis(timeout)?;
+        let mut actual: u16 = 0;
+
+        // SAFETY: the setup struct is plain data, and the format field points
+        // at the format the library gives. The request carries no data, so the
+        // data pointer is null and `wLength` is 0.
+        let rc = unsafe {
+            let mut setup: sys::LIBUSB20_CONTROL_SETUP_DECODED = core::mem::zeroed();
+            setup.LIBUSB20_CONTROL_SETUP_FORMAT = sys::LIBUSB20_CONTROL_SETUP_FORMAT.as_ptr();
+            setup.bmRequestType = 0x21;
+            setup.bRequest = request;
+            setup.wValue = value;
+            setup.wIndex = u16::from(interface);
+            setup.wLength = 0;
+
+            sys::libusb20_dev_request_sync(
+                self.dev,
+                &mut setup,
+                ptr::null_mut(),
+                &mut actual,
+                ms,
+                0,
+            )
+        };
+
+        if rc != 0 {
+            return Err(UsbError::Control(rc));
+        }
+        Ok(())
+    }
+
+    /// Resets the PTP state of the device.
+    ///
+    /// The still imaging class defines request 0x66, which is the device reset
+    /// request. The request puts the protocol of the device in the state that
+    /// follows a connect, and the request closes any open session.
+    ///
+    /// A program that stops in the middle of a data phase leaves the device in
+    /// a state where the device answers no command. This request repairs that
+    /// state, and the request needs no root.
+    pub fn ptp_device_reset(&mut self, interface: u8, timeout: Duration) -> Result<(), UsbError> {
+        self.class_request_out(PTP_DEVICE_RESET_REQUEST, 0, interface, timeout)
     }
 
     /// Reports whether a kernel driver holds an interface.

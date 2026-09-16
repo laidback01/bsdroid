@@ -24,6 +24,8 @@ pub const OP_GET_OBJECT: u16 = 0x1009;
 
 /// Response code for success.
 pub const RESP_OK: u16 = 0x2001;
+/// Response code for a session that is already open.
+pub const RESP_SESSION_ALREADY_OPEN: u16 = 0x201e;
 
 /// The size of one read, in bytes.
 const READ_BUFFER_DEFAULT: usize = 64 * 1024;
@@ -51,17 +53,27 @@ fn read_buffer_size() -> usize {
     }
 }
 
-/// The largest data phase the probe accepts, in bytes.
+/// The largest data phase the host accepts, in bytes.
 ///
-/// A phone with many files answers `GetObjectHandles` with a large container.
-/// The limit stops a damaged length field from filling the memory of the host.
-const MAX_DATA_BYTES: usize = 64 * 1024 * 1024;
+/// The host writes the payload to a writer, and the host does not hold the
+/// payload in memory. The limit therefore guards against a damaged length
+/// field, and not against a large file. A video of 8 GB is a real file.
+const MAX_DATA_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// The largest count of reads for one data phase.
 ///
 /// Rule 1 says that a loop must not depend on the device for the end
 /// condition. See `docs/00-why.md`.
-const MAX_READ_ROUNDS: usize = 8192;
+///
+/// The value must never stop a transfer that the device can finish. The count
+/// of reads a transfer needs is the declared size divided by the read size.
+/// The smallest read is [`READ_BUFFER_MIN`], so the largest honest count is
+/// `MAX_DATA_BYTES / READ_BUFFER_MIN`.
+///
+/// An earlier version used 8192. A read of 4 KiB then stopped at
+/// 8192 * 4096 bytes, which is 32 MiB, and a video of 39 MB failed. The limit
+/// must come from the other limits, and not from a number somebody chose.
+const MAX_READ_ROUNDS: u64 = MAX_DATA_BYTES / READ_BUFFER_MIN as u64;
 
 /// What one operation did.
 #[derive(Debug, Clone)]
@@ -186,11 +198,18 @@ impl<'a> Session<'a> {
     /// The session does not send `OpenSession`. A caller does that, so a caller
     /// can watch what the operation does.
     pub fn new(channels: MtpChannels<'a>, timeout: Duration) -> Self {
-        Self {
+        let mut s = Self {
             channels,
             transaction: 0,
             timeout,
+        };
+        // A program that stopped in the middle of a transfer can leave the
+        // device with bytes to send. Start from a known state.
+        let dropped = s.recover();
+        if dropped > 0 {
+            println!("    the device still held {dropped} bytes, and the host dropped them");
         }
+        s
     }
 
     /// Does one operation and reads the answer.
@@ -261,11 +280,11 @@ impl<'a> Session<'a> {
         let response = match first.kind {
             ContainerType::Data => {
                 let declared = first.length as usize;
-                if declared > MAX_DATA_BYTES {
+                if declared as u64 > MAX_DATA_BYTES {
                     return Err(SessionError::TooLarge {
                         step,
                         declared,
-                        limit: MAX_DATA_BYTES,
+                        limit: MAX_DATA_BYTES as usize,
                     });
                 }
 
@@ -282,7 +301,9 @@ impl<'a> Session<'a> {
                 // The loop needs one round for each transfer. The bound comes
                 // from the declared size, and the bound has a limit. A device
                 // cannot hold the host here.
-                let rounds = declared / buf_size + 4;
+                // The count comes from the declared size and the read size,
+                // so the count never stops a transfer the device can finish.
+                let rounds = (declared / buf_size + 16) as u64;
                 let rounds = core::cmp::min(rounds, MAX_READ_ROUNDS);
 
                 let mut complete = have >= declared;
@@ -345,6 +366,50 @@ impl<'a> Session<'a> {
         })
     }
 
+    /// Puts the two endpoints in a known state.
+    ///
+    /// A program that stops in the middle of a data phase leaves the device
+    /// with bytes to send, and can leave an endpoint in a halt condition. The
+    /// next program then finds a device that does not answer, and the fault
+    /// looks like a broken device.
+    ///
+    /// The function clears the halt condition on both endpoints, and then
+    /// reads and drops the bytes the device still holds. A new session starts
+    /// with this function, so a user does not need to pull the cable.
+    pub fn recover(&mut self) -> u64 {
+        self.channels.write.clear_stall();
+        self.channels.read.clear_stall();
+        self.drain()
+    }
+
+    /// Reads and drops the bytes the device still holds for the host.
+    ///
+    /// A data phase that fails leaves the device with bytes to send. The next
+    /// command then meets a device that is still sending, and the write to the
+    /// device does not finish. The host must read the rest before the host
+    /// sends a new command.
+    ///
+    /// The function gives the count of bytes it dropped. The loop stops at the
+    /// first empty read, at the first fault, or at the round limit.
+    pub fn drain(&mut self) -> u64 {
+        let buf_size = read_buffer_size();
+        let mut buf = vec![0u8; buf_size];
+        let mut dropped = 0u64;
+
+        // A short deadline, because an empty endpoint must not cost the full
+        // deadline on each round.
+        let short = Duration::from_millis(250);
+
+        for _ in 0..MAX_READ_ROUNDS {
+            match self.channels.read.read(&mut buf, short) {
+                Ok(0) => break,
+                Ok(n) => dropped += n as u64,
+                Err(_) => break,
+            }
+        }
+        dropped
+    }
+
     /// Sends `OpenSession` with a session id.
     pub fn open_session(&mut self, id: u32) -> Result<Outcome, SessionError> {
         self.operation("OpenSession", OP_OPEN_SESSION, &[id])
@@ -353,6 +418,32 @@ impl<'a> Session<'a> {
     /// Sends `CloseSession`.
     pub fn close_session(&mut self) -> Result<Outcome, SessionError> {
         self.operation("CloseSession", OP_CLOSE_SESSION, &[])
+    }
+
+    /// Opens a session, and repairs the state of an earlier session.
+    ///
+    /// A program that stops without a `CloseSession` leaves a session open on
+    /// the device. The device then answers `OpenSession` with 0x201e, which
+    /// means the session is already open.
+    ///
+    /// The function closes the old session and opens a new one. A user
+    /// therefore does not need to pull the cable after a program stops.
+    pub fn open_session_or_repair(&mut self, id: u32) -> Result<Outcome, SessionError> {
+        let first = self.open_session(id)?;
+        if first.response_code != RESP_SESSION_ALREADY_OPEN {
+            return Ok(first);
+        }
+
+        println!("    a session from an earlier program is open, and the host closes it");
+        let _ = self.close_session();
+
+        // The close can leave bytes on the way. Clear the endpoints before the
+        // next command, or the next command meets a busy device.
+        let dropped = self.recover();
+        if dropped > 0 {
+            println!("    the host dropped {dropped} more bytes");
+        }
+        self.open_session(id)
     }
 }
 
