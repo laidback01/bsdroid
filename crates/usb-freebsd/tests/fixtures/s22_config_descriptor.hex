@@ -1,0 +1,70 @@
+# USB configuration descriptor, Samsung SM-S901U (Galaxy S22), Android 16.
+#
+# Source command:
+#   usbconfig -d ugen0.11 do_request 0x80 0x06 0x0200 0 256
+#
+# The phone has USB debugging on, so the phone shows the adb interface. A
+# parser must find interface 0 and must ignore the other three interfaces.
+#
+# Two of the other interfaces also have bulk endpoints. A parser that looks
+# for a bulk endpoint, and does not first check the interface class, finds the
+# wrong endpoint.
+
+# --- Configuration descriptor ---
+09          # bLength = 9
+02          # bDescriptorType = 2 (CONFIGURATION)
+8800        # wTotalLength = 136
+04          # bNumInterfaces = 4
+01          # bConfigurationValue = 1
+04          # iConfiguration = 4
+80          # bmAttributes = 0x80 (bus power)
+fa          # bMaxPower = 250, which is 500 mA
+
+# --- Interface 0: MTP. This is the interface the project needs. ---
+09          # bLength = 9
+04          # bDescriptorType = 4 (INTERFACE)
+00          # bInterfaceNumber = 0
+00          # bAlternateSetting = 0
+03          # bNumEndpoints = 3
+06          # bInterfaceClass = 0x06 (still imaging)
+01          # bInterfaceSubClass = 0x01
+01          # bInterfaceProtocol = 0x01
+05          # iInterface = 5
+
+07 05 81 02 0002 00   # endpoint 0x81, bulk, 512 bytes. Data from the device.
+07 05 01 02 0002 00   # endpoint 0x01, bulk, 512 bytes. Data to the device.
+07 05 82 03 1c00 06   # endpoint 0x82, interrupt, 28 bytes. Event from device.
+
+# --- Interface association: interfaces 1 and 2 form one CDC function ---
+08 0b 01 02 02 02 01 08
+
+# --- Interface 1: CDC control. Not MTP. ---
+09 04 01 00 01 02 02 01 06
+05 24 00 1001         # CDC header
+05 24 01 00 02        # CDC call management
+04 24 02 02           # CDC abstract control
+05 24 06 01 02        # CDC union
+07 05 84 03 0a00 09   # endpoint 0x84, interrupt
+
+# --- Interface 2: CDC data. Not MTP, but it does have bulk endpoints. ---
+09 04 02 00 02 0a 00 00 07
+07 05 83 02 0002 00   # endpoint 0x83, bulk. A parser must not choose this.
+07 05 02 02 0002 00   # endpoint 0x02, bulk. A parser must not choose this.
+
+# --- Interface 3: adb. Not MTP, and it also has bulk endpoints. ---
+09          # bLength = 9
+04          # bDescriptorType = 4 (INTERFACE)
+03          # bInterfaceNumber = 3
+00          # bAlternateSetting = 0
+02          # bNumEndpoints = 2
+ff          # bInterfaceClass = 0xff (vendor)
+42          # bInterfaceSubClass = 0x42
+01          # bInterfaceProtocol = 0x01
+0a          # iInterface = 10
+07 05 03 02 0002 00   # endpoint 0x03, bulk. A parser must not choose this.
+07 05 85 02 0002 00   # endpoint 0x85, bulk. A parser must not choose this.
+
+# --- A vendor descriptor at the end ---
+08 24 80 0c 00 01 00 01
+
+# The lengths add to 136, which agrees with wTotalLength.

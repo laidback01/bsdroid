@@ -1,0 +1,13 @@
+[package]
+name = "usb-freebsd"
+description = "USB transport over libusb20, the native FreeBSD USB library."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# This crate does not use libusb-1.0. See docs/00-why.md.
+# The crate has no Rust dependency. The crate links libusb20, which FreeBSD
+# ships in the base system.
+[dependencies]

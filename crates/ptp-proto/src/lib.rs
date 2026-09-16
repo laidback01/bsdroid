@@ -258,13 +258,11 @@ impl<'a> Reader<'a> {
 
         // Check the count against the buffer before the allocation. A damaged
         // count of 0xffffffff must not make the host reserve 16 GiB.
-        let need = count
-            .checked_mul(4)
-            .ok_or(ParseError::Truncated {
-                field,
-                need: usize::MAX,
-                got: self.remaining(),
-            })?;
+        let need = count.checked_mul(4).ok_or(ParseError::Truncated {
+            field,
+            need: usize::MAX,
+            got: self.remaining(),
+        })?;
         if self.remaining() < need {
             return Err(ParseError::Truncated {
                 field,

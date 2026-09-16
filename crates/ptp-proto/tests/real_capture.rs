@@ -35,7 +35,9 @@ fn parses_get_storage_ids_data() {
     assert_eq!(c.code, OP_GET_STORAGE_IDS);
     assert_eq!(c.transaction_id, 33);
 
-    let ids = c.payload_as_u32_array().expect("the payload is a u32 array");
+    let ids = c
+        .payload_as_u32_array()
+        .expect("the payload is a u32 array");
     assert_eq!(ids, vec![0x0001_0001], "the S22 reports one storage");
 }
 
