@@ -165,9 +165,43 @@ The name comes from a product identifier table in the host, and the table maps
 Do not use the product string to identify a device. Use `idVendor` and
 `idProduct`, and treat the string as a label for a person to read.
 
-## One product identifier for each mode
+## MIDI mode, and a second trap
 
-The phone gives a different `idProduct` for each mode:
+Reading F is MIDI mode, with the screen unlocked:
+
+| Item             | Value                                       |
+| ---------------- | ------------------------------------------- |
+| `sys.usb.config` | `midi,adb`                                  |
+| `idProduct`      | 0x686c                                      |
+| Interfaces       | 3: audio control, MIDI streaming, adb       |
+| MTP interface    | absent                                      |
+
+The audio class uses 9 bytes for an endpoint descriptor. The standard endpoint
+descriptor holds 7 bytes.
+
+A parser that adds 7 to the position reads the next descriptor at the wrong
+offset. Every descriptor after the first endpoint is then wrong. A parser must
+add the length byte of each descriptor.
+
+The project parser adds the length byte, because a length of 0 must give an
+error. The rule came from the endless loop in `docs/00-why.md`. The rule also
+solves this problem, and no test covered a descriptor of 9 bytes until this
+capture.
+
+MIDI mode also gives endpoint 0x01 and endpoint 0x81 to another interface, as
+tethering mode does. Two modes now hold that trap, with two different interface
+classes.
+
+### A note about the passcode
+
+The user reported that MIDI mode needed no passcode on the phone, and that file
+transfer mode did need one. The project made no measurement of this behaviour.
+The note is a report from a person, and not a test result.
+
+MIDI mode gives no file access, so the difference does not put a file at risk
+here.
+
+## One product identifier for most modes
 
 | Mode                 | `sys.usb.config`   | `idProduct` | MTP interface |
 | -------------------- | ------------------ | ----------- | ------------- |
@@ -175,6 +209,7 @@ The phone gives a different `idProduct` for each mode:
 | Charge only          | `sec_charging,adb` | 0x6860      | present       |
 | Transferring images  | `ptp,adb`          | 0x6866      | present       |
 | USB tethering        | `rndis,adb`        | 0x6864      | absent        |
+| MIDI                 | `midi,adb`         | 0x686c      | absent        |
 
 Charge mode and file transfer mode share `idProduct`. The two modes therefore
 need the storage test, and no descriptor field separates them.

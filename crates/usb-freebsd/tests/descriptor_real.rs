@@ -366,6 +366,106 @@ fn the_network_interface_owns_the_addresses_that_mtp_uses_elsewhere() {
     );
 }
 
+// --- MIDI mode ---
+
+#[test]
+fn the_midi_fixture_agrees_with_its_own_header() {
+    let bytes = common::load("s22_midi_descriptor.hex");
+    assert_eq!(bytes.len(), 132);
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+    assert_eq!(cfg.total_length, 132);
+    assert_eq!(cfg.num_interfaces, 3);
+}
+
+#[test]
+fn midi_gives_no_mtp_interface_and_still_shows_adb() {
+    let bytes = common::load("s22_midi_descriptor.hex");
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+
+    assert_eq!(
+        MtpInterface::find(&cfg),
+        Err(DescriptorError::NoMtpInterface)
+    );
+    let adb: Vec<u8> = cfg
+        .interfaces
+        .iter()
+        .filter(|i| i.is_adb())
+        .map(|i| i.number)
+        .collect();
+    assert_eq!(adb, vec![2]);
+}
+
+/// The audio class gives endpoint descriptors of 9 bytes, and not 7.
+///
+/// A parser that adds 7 to the position reads the next descriptor at the wrong
+/// offset. The parser must add the length byte. This capture is the first real
+/// test of that rule.
+#[test]
+fn reads_endpoint_descriptors_that_hold_nine_bytes() {
+    let bytes = common::load("s22_midi_descriptor.hex");
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+
+    // Interface 0 declares no endpoint. Interface 1 declares two, and each
+    // endpoint descriptor holds 9 bytes. Interface 2 declares two, and each
+    // endpoint descriptor holds 7 bytes.
+    let counts: Vec<usize> = cfg.interfaces.iter().map(|i| i.endpoints.len()).collect();
+    assert_eq!(counts, vec![0, 2, 2]);
+
+    // The parser found the correct addresses, so the parser did not lose the
+    // position at the first 9 byte descriptor.
+    let midi: Vec<u8> = cfg.interfaces[1]
+        .endpoints
+        .iter()
+        .map(|e| e.address)
+        .collect();
+    assert_eq!(midi, vec![0x01, 0x81]);
+
+    let adb: Vec<u8> = cfg.interfaces[2]
+        .endpoints
+        .iter()
+        .map(|e| e.address)
+        .collect();
+    assert_eq!(
+        adb,
+        vec![0x02, 0x82],
+        "the adb endpoints follow the MIDI ones"
+    );
+
+    // The packet size is correct, which shows the fields are at the right
+    // offsets inside the 9 byte descriptor.
+    assert!(cfg.interfaces[1]
+        .endpoints
+        .iter()
+        .all(|e| e.max_packet_size == 512));
+}
+
+/// Two modes give the MTP endpoint addresses to another interface.
+///
+/// The check is the same in both, and the interface class differs. The class
+/// check protects the host in both modes.
+#[test]
+fn two_modes_give_the_mtp_addresses_to_a_different_interface() {
+    for (name, class) in [
+        ("s22_tethering_descriptor.hex", 0x0a), // CDC data
+        ("s22_midi_descriptor.hex", 0x01),      // audio
+    ] {
+        let cfg = ConfigDescriptor::parse(&common::load(name)).unwrap();
+        let owner = cfg
+            .interfaces
+            .iter()
+            .find(|i| i.endpoints.iter().any(|e| e.address == 0x81))
+            .unwrap_or_else(|| panic!("{name} must give an owner for 0x81"));
+
+        assert_eq!(owner.class, class, "{name}");
+        assert!(!owner.is_mtp(), "{name}");
+        assert_eq!(
+            MtpInterface::find(&cfg),
+            Err(DescriptorError::NoMtpInterface),
+            "{name}"
+        );
+    }
+}
+
 // --- Tests for damaged input ---
 //
 // Rule 3 in docs/00-why.md: a parse function never panics.
