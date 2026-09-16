@@ -75,11 +75,44 @@ The two runs give the same bytes and the same object count. The join path works.
 `Outcome::reads` holds the count, and `mtpprobe` prints the count. A reader
 then sees the evidence, and does not need to trust a calculation.
 
-## An open question
+## Image transfer mode gives a part of the storage
 
-The project has no measurement of image transfer mode. `docs/02-device-states.md`
-records that image mode gives the same storage, the same capacity and the same
-free space as file transfer mode.
+The same phone, in image transfer mode:
 
-The object count is the test that separates the two modes. A run of
-`mtpprobe objects` in image mode answers the question.
+| Item                       | File transfer | Image transfer |
+| -------------------------- | ------------- | -------------- |
+| Objects on the storage     | 2059          | 821            |
+| Objects in the root folder | 13            | 2              |
+| Capacity                   | 239935107072  | 239935107072   |
+| Free space                 | the same      | the same       |
+
+The root folder in file transfer mode:
+
+```
+Pictures  Audiobooks  Alarms  Recordings  Android  Music
+Documents  Podcasts  Movies  DCIM  Notifications  Download  Screenshots
+```
+
+The root folder in image transfer mode:
+
+```
+Pictures  DCIM
+```
+
+Image transfer mode gives the two folders that hold photographs. The mode hides
+the other 11 folders, and the mode hides 1238 objects.
+
+### Why the storage test is not enough
+
+The capacity and the free space are the same in both modes. A host that reads
+the storage alone finds no difference.
+
+The object count is the only test that shows the difference.
+
+### What to tell a user
+
+Image transfer mode is a fallback for a photograph. Image transfer mode is not
+a fallback for a file.
+
+An earlier note in this project called image mode a working fallback. The note
+came from a storage test, and the storage test cannot see the difference.

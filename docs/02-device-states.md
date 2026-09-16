@@ -94,14 +94,19 @@ The first attempt gave an empty list, and the second attempt gave the storage.
 The cold start in `docs/01-cold-start.md` happens in this mode too. A host that
 asks one time reports "no files" for a mode that works.
 
-### A limit on this result
+### A limit on this result, which a later test measured
 
-The test read the storage. The test did not list an object. PTP normally gives
-the images, and MTP gives all the files. The capacity is the same in both
-modes, and the set of objects is possibly not the same.
+The test above read the storage, and the test did not list an object.
 
-No test yet lists the objects. Do not tell a user that image mode gives the
-same files as file transfer mode.
+A later test listed the objects. Image transfer mode gives 821 objects, and
+file transfer mode gives 2059 objects on the same phone. Image transfer mode
+gives 2 folders in the root, and file transfer mode gives 13.
+
+The capacity and the free space are the same in both modes, so the storage test
+cannot see the difference. See `docs/03-object-handles.md`.
+
+Image transfer mode is a fallback for a photograph. Image transfer mode is not
+a fallback for a file.
 
 ## Two fields separate file transfer from image mode
 
