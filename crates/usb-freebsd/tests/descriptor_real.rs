@@ -294,6 +294,78 @@ fn the_interface_string_index_separates_file_transfer_from_image_mode() {
     assert_ne!(index(&transfer), index(&image));
 }
 
+// --- USB tethering mode ---
+
+#[test]
+fn the_tethering_fixture_agrees_with_its_own_header() {
+    let bytes = common::load("s22_tethering_descriptor.hex");
+    assert_eq!(bytes.len(), 106);
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+    assert_eq!(cfg.total_length, 106);
+    assert_eq!(cfg.num_interfaces, 3);
+}
+
+/// Tethering mode gives no MTP interface. The mode is different from charge
+/// mode, which keeps the interface.
+#[test]
+fn tethering_gives_no_mtp_interface() {
+    let bytes = common::load("s22_tethering_descriptor.hex");
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+
+    assert_eq!(
+        MtpInterface::find(&cfg),
+        Err(DescriptorError::NoMtpInterface)
+    );
+    assert!(cfg.interfaces.iter().all(|i| !i.is_mtp()));
+}
+
+/// The host still knows that the device runs Android.
+#[test]
+fn tethering_still_shows_the_adb_interface() {
+    let bytes = common::load("s22_tethering_descriptor.hex");
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+
+    let adb: Vec<u8> = cfg
+        .interfaces
+        .iter()
+        .filter(|i| i.is_adb())
+        .map(|i| i.number)
+        .collect();
+    assert_eq!(adb, vec![2], "interface 2 carries adb in this mode");
+}
+
+/// This test is the reason the parser checks the interface class first.
+///
+/// In tethering mode, the CDC data interface owns endpoint 0x81 and endpoint
+/// 0x01. The same two addresses carry MTP in file transfer mode and in image
+/// mode. A parser that chooses the first bulk pair opens the network
+/// interface, and then sends PTP to a network device.
+#[test]
+fn the_network_interface_owns_the_addresses_that_mtp_uses_elsewhere() {
+    let tethering = common::load("s22_tethering_descriptor.hex");
+    let transfer = common::load("s22_config_descriptor.hex");
+
+    // In file transfer mode the addresses belong to MTP.
+    let mtp = MtpInterface::find(&ConfigDescriptor::parse(&transfer).unwrap()).unwrap();
+    assert_eq!((mtp.bulk_in, mtp.bulk_out), (0x81, 0x01));
+
+    // In tethering mode the same addresses belong to CDC data, which is
+    // class 0x0a. The parser gives no MTP interface, so no caller can reach
+    // the addresses by accident.
+    let cfg = ConfigDescriptor::parse(&tethering).unwrap();
+    let owner = cfg
+        .interfaces
+        .iter()
+        .find(|i| i.endpoints.iter().any(|e| e.address == 0x81))
+        .expect("some interface owns 0x81");
+    assert_eq!(owner.class, 0x0a, "CDC data owns the address here");
+    assert!(!owner.is_mtp());
+    assert_eq!(
+        MtpInterface::find(&cfg),
+        Err(DescriptorError::NoMtpInterface)
+    );
+}
+
 // --- Tests for damaged input ---
 //
 // Rule 3 in docs/00-why.md: a parse function never panics.

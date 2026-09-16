@@ -120,6 +120,65 @@ This finding narrows an earlier statement in this document. A host cannot learn
 the USB mode from the interface class. A host can learn something from other
 fields, on this phone. A test on one phone is not a rule for all phones.
 
+## Tethering mode removes the interface
+
+Reading E is USB tethering, with the screen unlocked:
+
+| Item             | Value                                     |
+| ---------------- | ----------------------------------------- |
+| `sys.usb.config` | `rndis,adb`                               |
+| `idProduct`      | 0x6864                                    |
+| Interfaces       | 3: RNDIS 0xe0, CDC data 0x0a, adb 0xff    |
+| MTP interface    | absent                                    |
+
+`mtpprobe` reported the correct cause:
+
+```
+RESULT: an Android device is connected, and the device gives no MTP
+  interface. The device shows the adb interface, so the device is
+  awake and the cable carries data.
+```
+
+This reading is the first test of that message against real hardware.
+
+### The trap in this capture
+
+The CDC data interface owns endpoint 0x81 and endpoint 0x01. The same two
+addresses carry MTP in file transfer mode and in image mode.
+
+A host that looks for a bulk endpoint pair, and does not check the interface
+class first, opens the network interface. The host then sends PTP to a network
+device. The class check is the reason this project does not do that.
+
+### The product string is wrong
+
+FreeBSD names the device in this mode:
+
+```
+GT-I9070 (network tethering, USB debugging enabled)
+```
+
+A GT-I9070 is a Galaxy S Advance from 2012. The phone is an SM-S901U from 2022.
+The name comes from a product identifier table in the host, and the table maps
+0x6864 to the old model.
+
+Do not use the product string to identify a device. Use `idVendor` and
+`idProduct`, and treat the string as a label for a person to read.
+
+## One product identifier for each mode
+
+The phone gives a different `idProduct` for each mode:
+
+| Mode                 | `sys.usb.config`   | `idProduct` | MTP interface |
+| -------------------- | ------------------ | ----------- | ------------- |
+| File transfer        | `mtp,adb`          | 0x6860      | present       |
+| Charge only          | `sec_charging,adb` | 0x6860      | present       |
+| Transferring images  | `ptp,adb`          | 0x6866      | present       |
+| USB tethering        | `rndis,adb`        | 0x6864      | absent        |
+
+Charge mode and file transfer mode share `idProduct`. The two modes therefore
+need the storage test, and no descriptor field separates them.
+
 ## What this means for a fault report
 
 The host can state these facts:
