@@ -1,7 +1,16 @@
 //! USB device access over `libusb20`.
 //!
-//! This module holds the only unsafe code in the project. The module keeps the
-//! unsafe code small, and gives a safe interface to the rest of the project.
+//! This module holds every call into `libusb20`, and every `unsafe` block that
+//! goes with one. The rest of the project reads and writes through the safe
+//! interface here.
+//!
+//! One other place holds `unsafe`: the FUSE callbacks in `mtpfs`, which the C
+//! library calls through a function pointer. That boundary cannot be safe.
+//!
+//! An earlier version of this comment said the module held the only unsafe
+//! code in the project. It did not: `mtpfs` also made two `&'static`
+//! references from a `Box` to work around the shape of this interface.
+//! `OpenDevice::into_mtp` now gives an owner, and that `unsafe` is gone.
 //!
 //! # The rule this module exists to obey
 //!

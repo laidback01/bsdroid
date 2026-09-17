@@ -58,8 +58,9 @@ give the same SHA-256 sum.
 The small read costs 22% more time. The cost is low, because each read has a
 small fixed cost and the device sends the same bytes.
 
-The environment variable `BSDROID_READ_BUFFER` sets the read size. The variable
-is a test hook, and not a setting for a user.
+The `bench` command of `mtpprobe` sets the read size for each row. An earlier
+version set the size with an environment variable, which the session read again
+on every transfer.
 
 ## What limits the rate
 

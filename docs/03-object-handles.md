@@ -62,8 +62,9 @@ The handle list of the test device holds 8240 bytes, and 8240 bytes fit in one
 read of 64 KiB. The join path therefore did no work, and no test covered the
 path.
 
-The environment variable `BSDROID_READ_BUFFER` sets the size of one read. The
-variable is a test hook, and not a setting for a user.
+`Config::read_buffer` sets the size of one read. A test gives the session a
+small value, and a device that answers with more bytes than the value then uses
+the join path.
 
 | Read size | Reads | Data bytes | Objects |
 | --------- | ----- | ---------- | ------- |

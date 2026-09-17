@@ -290,14 +290,25 @@ and the next mount then needs a repair.
 An option goes to FUSE:
 
 ```
-mtpfs ugen0.11 /mnt/phone -f    stay in the foreground, and write messages
-mtpfs ugen0.11 /mnt/phone -d    stay in the foreground, and write each request
+mtpfs ugen0.11 /mnt/phone -f              stay in the foreground, and write messages
+mtpfs ugen0.11 /mnt/phone -d              stay in the foreground, and write each request
+mtpfs ugen0.11 /mnt/phone -o allow_other  give a mount option to FUSE
 ```
+
+The value after `-o` belongs to the option, and not to the device.
 
 ### The probe
 
 `mtpprobe` reports what a cellphone does, and where a transfer stops. Run
 `mtpprobe --help` for the commands.
+
+With no `-d`, each command takes the first cellphone it finds. Name a device
+to reach another one:
+
+```
+mtpprobe -d ugen0.12 probe
+mtpprobe -d ugen0.12 caps
+```
 
 ## Test hardware
 
