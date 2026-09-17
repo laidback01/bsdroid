@@ -110,3 +110,51 @@ argument rested on a number that the project made.
 
 Measure a change against the same code. A number from an older version of a
 program is a number about that version.
+
+## The other reset, which goes to the port
+
+Request 0x66 is not the only reset. `libusb20_dev_reset` sends a reset to the
+USB port. The device leaves the bus and comes back, in the state a user gets
+after a connect. If `BSDROID_USB_RESET` is on, `mtpfs` sends this reset when a
+session closes.
+
+`libmtp` holds a flag for the same job, `DEVICE_FLAG_FORCE_RESET_ON_CLOSE`.
+The flag is on the entry for the MediaTek chip 0x0e8d:0x2008.
+
+### A reset needs root
+
+An earlier comment in `usb-freebsd` said that `usbconfig` needs root for a
+reset and that this call does not. That is wrong.
+
+| Who runs it | What happens                                     |
+| ----------- | ------------------------------------------------ |
+| operator    | code -99, and the device stays on the bus        |
+| root        | the device leaves and comes back in about 4600 ms |
+
+The code is `LIBUSB20_ERROR_OTHER`, and not `LIBUSB20_ERROR_ACCESS`. The
+number does not name the cause, so only the run as root gives the answer.
+
+`BSDROID_USB_RESET` therefore does nothing for a user who is not root.
+
+### Two of three cellphones leave file transfer mode
+
+A port reset costs the user. Measured on three cellphones, each reset as root:
+
+| Device                        | After the reset                        |
+| ----------------------------- | -------------------------------------- |
+| Motorola Moto G (5)           | the user set file transfer mode again  |
+| Samsung SM-S901U              | the user set file transfer mode again  |
+| Cyrus CS 24, 0x0e8d:0x2008    | stayed in file transfer mode           |
+
+The device that does not care is the MediaTek chip, which is the one device
+`libmtp` resets on close. A flag for one chip is the right shape for this. A
+reset for every device is not.
+
+### How the project got this wrong the first time
+
+The project read `mtpfs -l` after a reset, saw all three devices, and reported
+that no device left file transfer mode. The list was right and the conclusion
+was wrong: a person had already set the mode again on two of them.
+
+A device list says what the bus holds now. It does not say what a person had
+to do to put it there. Ask the person.
