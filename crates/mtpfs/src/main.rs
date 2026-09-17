@@ -65,32 +65,46 @@ const MODE_FILE: u32 = 0o100_644;
 const MAX_WALK: usize = 64;
 
 fn main() -> std::process::ExitCode {
-    let args: Vec<String> = std::env::args().collect();
+    let argv: Vec<String> = std::env::args().collect();
+    let args = &argv[1..];
 
-    if args.len() < 2 || args[1] == "--help" || args[1] == "-h" {
-        println!("mtpfs {}", env!("CARGO_PKG_VERSION"));
-        println!();
-        println!("Mounts an Android device as a folder.");
-        println!();
-        println!("Usage:");
-        println!("  mtpfs <mount point> [options]");
-        println!();
-        println!("Before you start:");
-        println!("  1. Connect the cellphone.");
-        println!("  2. Unlock the cellphone.");
-        println!("  3. Put the cellphone into file transfer mode.");
-        println!();
-        println!("Options:");
-        println!("  -f    Stay in the foreground, and write messages.");
-        println!("  -d    Stay in the foreground, and write each request.");
-        println!();
-        println!("To stop:");
-        println!("  umount <mount point>");
-        return std::process::ExitCode::SUCCESS;
+    // Separate what this program reads from what FUSE reads. An argument that
+    // starts with `-` goes to FUSE, and the rest name a device and a folder.
+    let mut positional: Vec<&str> = Vec::new();
+    let mut fuse_args: Vec<&str> = Vec::new();
+    for a in args {
+        if a.starts_with('-') {
+            fuse_args.push(a);
+        } else {
+            positional.push(a);
+        }
     }
 
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        usage();
+        return std::process::ExitCode::SUCCESS;
+    }
+    if args.iter().any(|a| a == "-l" || a == "--list") {
+        return list_devices();
+    }
+
+    // The form follows `mount_msdosfs`: a device, and then a folder.
+    //
+    //   mtpfs ugen0.11 /mnt/phone
+    //   mtpfs /mnt/phone
+    //
+    // One name is a folder, and the first of two names is a device.
+    let (node, mount_point) = match positional.len() {
+        1 => (None, positional[0]),
+        2 => (Some(positional[0]), positional[1]),
+        _ => {
+            usage();
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
     println!("mtpfs: look for a device");
-    let mtp = match Mtp::open() {
+    let mtp = match Mtp::open(node) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("mtpfs: {e}");
@@ -133,13 +147,15 @@ fn main() -> std::process::ExitCode {
     ops.chown = Some(op_chown);
 
     // The mount runs in one thread. The option `-s` says so.
-    let mut argv: Vec<CString> = Vec::new();
-    argv.push(CString::new("mtpfs").unwrap());
-    argv.push(CString::new("-s").unwrap());
-    for a in &args[1..] {
-        argv.push(CString::new(a.as_str()).unwrap());
+    let mut c_args: Vec<CString> = Vec::new();
+    c_args.push(CString::new("mtpfs").unwrap());
+    c_args.push(CString::new("-s").unwrap());
+    for a in &fuse_args {
+        c_args.push(CString::new(*a).unwrap());
     }
-    let mut raw: Vec<*mut i8> = argv.iter().map(|c| c.as_ptr() as *mut i8).collect();
+    c_args.push(CString::new(mount_point).unwrap());
+
+    let mut raw: Vec<*mut i8> = c_args.iter().map(|c| c.as_ptr() as *mut i8).collect();
     raw.push(core::ptr::null_mut());
 
     let mut version = sys::libfuse_version {
@@ -149,7 +165,7 @@ fn main() -> std::process::ExitCode {
         padding: 0,
     };
 
-    println!("mtpfs: mount");
+    println!("mtpfs: mount on {mount_point}");
     // SAFETY: the argument vector ends with a null pointer, and the operations
     // struct lives until the call returns.
     let rc = unsafe {
@@ -171,6 +187,63 @@ fn main() -> std::process::ExitCode {
     } else {
         std::process::ExitCode::FAILURE
     }
+}
+
+/// Writes one line for each device that gives an MTP interface.
+fn list_devices() -> std::process::ExitCode {
+    match Mtp::list_devices() {
+        Ok(list) if list.is_empty() => {
+            println!("No device gives an MTP interface.");
+            println!();
+            println!("Connect the cellphone, unlock the cellphone, and put the");
+            println!("cellphone into file transfer mode.");
+            std::process::ExitCode::FAILURE
+        }
+        Ok(list) => {
+            println!("{:<12}  {:<12}  NAME", "NODE", "ID");
+            for d in list {
+                println!(
+                    "{:<12}  {:04x}:{:04x}    {}",
+                    d.node, d.vendor_id, d.product_id, d.name
+                );
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("mtpfs: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn usage() {
+    println!("mtpfs {}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("Mounts an Android cellphone as a folder.");
+    println!();
+    println!("Usage:");
+    println!("  mtpfs [device] <mount point> [options]");
+    println!("  mtpfs -l");
+    println!();
+    println!("The device is a node name, such as ugen0.11 or /dev/ugen0.11.");
+    println!("With no device, the program takes the first cellphone it finds.");
+    println!();
+    println!("Examples:");
+    println!("  mtpfs /mnt/phone              the first cellphone");
+    println!("  mtpfs ugen0.11 /mnt/phone     one named cellphone");
+    println!("  mtpfs -l                      each cellphone the host sees");
+    println!();
+    println!("Before you start:");
+    println!("  1. Connect the cellphone.");
+    println!("  2. Unlock the cellphone.");
+    println!("  3. Put the cellphone into file transfer mode.");
+    println!();
+    println!("Options go to FUSE:");
+    println!("  -f    Stay in the foreground, and write messages.");
+    println!("  -d    Stay in the foreground, and write each request.");
+    println!();
+    println!("To stop:");
+    println!("  umount <mount point>");
 }
 
 /// Finds the handle a path names, and reads a folder when the tree needs one.

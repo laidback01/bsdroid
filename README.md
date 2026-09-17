@@ -138,13 +138,14 @@ copy is the job.
 
 `docs/10-what-works.md` holds the full list, with each limit and the reason.
 
-## Build and use
+## Build
 
 ```
 pkg install fusefs-libs3
 cargo build --release
-./target/release/mtpfs /path/to/an/empty/folder
 ```
+
+## Use
 
 Before you start:
 
@@ -152,14 +153,66 @@ Before you start:
 2. Unlock the cellphone.
 3. Put the cellphone into file transfer mode.
 
-To stop:
+### List each cellphone the host sees
 
 ```
-umount /path/to/an/empty/folder
+$ mtpfs -l
+NODE          ID            NAME
+ugen0.11      04e8:6860    SAMSUNG SAMSUNG_Android
+ugen0.12      22b8:2e82    motorola Moto G (5)
 ```
 
-The project also holds `mtpprobe`, which reports what a cellphone does, and
-where a transfer stops. Run `mtpprobe --help` for the commands.
+### Mount
+
+The form follows `mount_msdosfs`: the device, and then the folder.
+
+```
+mtpfs ugen0.11 /mnt/phone
+```
+
+A node name also takes the full form, `/dev/ugen0.11`.
+
+With no device, the program takes the first cellphone it finds:
+
+```
+mtpfs /mnt/phone
+```
+
+### Mount two cellphones
+
+Each mount names one device, so two mounts hold two cellphones:
+
+```
+mtpfs ugen0.11 /mnt/samsung
+mtpfs ugen0.12 /mnt/moto
+cp /mnt/samsung/DCIM/Camera/a.jpg /mnt/moto/DCIM/Camera/
+```
+
+A copy between two cellphones goes through the host, and the bytes arrive. A
+test compares a SHA-256 sum.
+
+### Stop a mount
+
+```
+umount /mnt/phone
+```
+
+Use `umount`. A signal to the program leaves the session open on the cellphone,
+and the next mount then needs a repair.
+
+### Options
+
+An option goes to FUSE:
+
+```
+mtpfs ugen0.11 /mnt/phone -f    stay in the foreground, and write messages
+mtpfs ugen0.11 /mnt/phone -d    stay in the foreground, and write each request
+```
+
+### The probe
+
+`mtpprobe` reports what a cellphone does, and where a transfer stops. Run
+`mtpprobe --help` for the commands.
 
 ## Test hardware
 

@@ -3,6 +3,41 @@
 This document holds the state of the filesystem. A limit here is a limit the
 project knows about, and each one has a reason.
 
+## How to call the program
+
+The form follows the other mount programs of FreeBSD. A device comes first,
+and a folder comes second:
+
+```
+mtpfs ugen0.11 /mnt/phone
+```
+
+| Form                            | What it does                         |
+| ------------------------------- | ------------------------------------ |
+| `mtpfs -l`                      | Lists each device that gives MTP     |
+| `mtpfs <folder>`                | Mounts the first device it finds     |
+| `mtpfs <node> <folder>`         | Mounts one named device              |
+| `mtpfs <node> <folder> -f`      | Stays in the foreground              |
+| `umount <folder>`               | Stops the mount                      |
+
+A node name takes two forms, `ugen0.11` and `/dev/ugen0.11`.
+
+### Two cellphones at one time
+
+Each mount holds one session, on one device. Two mounts therefore hold two
+cellphones:
+
+```
+mtpfs ugen0.11 /mnt/samsung
+mtpfs ugen0.12 /mnt/moto
+```
+
+A copy from one mount to the other works. The bytes go through the host, and a
+test compares a SHA-256 sum.
+
+An earlier version took no device name, and found the first device. Two mounts
+then held the same cellphone. A name gives the device a caller wants.
+
 ## What works
 
 | Operation                  | Command        | State |

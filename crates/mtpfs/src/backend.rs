@@ -91,6 +91,10 @@ pub enum Error {
     Device { step: &'static str, code: u16 },
     /// The device gives no storage.
     NoStorage,
+    /// The name of the device does not read as a node name.
+    BadNode(String),
+    /// The device the caller named gives no MTP interface.
+    NamedDeviceNotFound(String),
     /// The device cannot read part of a file.
     ///
     /// A filesystem needs a partial read, because a read asks for an offset.
@@ -111,6 +115,15 @@ impl std::fmt::Display for Error {
             Self::Device { step, code } => {
                 write!(f, "{step}: the device answered with the code {code:#06x}")
             }
+            Self::BadNode(n) => write!(
+                f,
+                "the name {n} does not read as a device node. A node name looks \
+                 like ugen0.11, or /dev/ugen0.11"
+            ),
+            Self::NamedDeviceNotFound(n) => write!(
+                f,
+                "the device {n} gives no MTP interface. Run `mtpfs -l` for a list"
+            ),
             Self::NoStorage => write!(
                 f,
                 "the device reports no storage. Unlock the cellphone, and put \
@@ -139,6 +152,29 @@ impl From<usb_freebsd::descriptor::DescriptorError> for Error {
     fn from(_: usb_freebsd::descriptor::DescriptorError) -> Self {
         Self::NoDevice
     }
+}
+
+/// One device that gives an MTP interface.
+pub struct DeviceEntry {
+    /// The name of the node, such as `ugen0.11`.
+    pub node: String,
+    pub bus: u8,
+    pub address: u8,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    /// The maker and the model, for a person to read.
+    pub name: String,
+}
+
+/// Reads a node name, and gives the bus and the address.
+///
+/// The function takes `ugen0.11` and `/dev/ugen0.11`, which are the two forms
+/// a person writes.
+pub fn parse_node(s: &str) -> Option<(u8, u8)> {
+    let s = s.strip_prefix("/dev/").unwrap_or(s);
+    let s = s.strip_prefix("ugen")?;
+    let (bus, addr) = s.split_once('.')?;
+    Some((bus.parse().ok()?, addr.parse().ok()?))
 }
 
 /// The bytes the host read in advance, for one object.
@@ -181,11 +217,74 @@ pub struct Mtp {
 }
 
 impl Mtp {
+    /// Lists each device that gives an MTP interface.
+    ///
+    /// The function gives the node name, the identifiers and the name of the
+    /// maker, for a person to read.
+    pub fn list_devices() -> Result<Vec<DeviceEntry>, Error> {
+        let backend = UsbBackend::new()?;
+        let mut out = Vec::new();
+
+        for d in backend.devices() {
+            let (vid, pid) = d.ids();
+            let bus = d.bus();
+            let addr = d.address();
+
+            let mut open = match d.open(4) {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            let raw = match open.config_descriptor_raw(TIMEOUT) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let cfg = match ConfigDescriptor::parse(&raw) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let mut names: Vec<(u8, Option<String>)> = Vec::new();
+            for i in cfg
+                .interfaces
+                .iter()
+                .filter(|i| i.is_vendor_mtp_candidate())
+            {
+                names.push((i.string_index, open.string_descriptor(i.string_index)));
+            }
+            let found = MtpInterface::find_with_names(&cfg, |idx| {
+                names
+                    .iter()
+                    .find(|(i, _)| *i == idx)
+                    .and_then(|(_, n)| n.clone())
+            });
+            if found.is_ok() {
+                // String 1 holds the maker, and string 2 holds the model.
+                let maker = open.string_descriptor(1).unwrap_or_default();
+                let model = open.string_descriptor(2).unwrap_or_default();
+                out.push(DeviceEntry {
+                    node: format!("ugen{bus}.{addr}"),
+                    bus,
+                    address: addr,
+                    vendor_id: vid,
+                    product_id: pid,
+                    name: format!("{maker} {model}").trim().to_string(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// Finds a device, opens a session, and reads what the device can do.
+    ///
+    /// `node` names one device, such as `ugen0.11`. A value of `None` takes
+    /// the first device that gives an MTP interface.
     ///
     /// The function gives an error when the device cannot read part of a file,
     /// because a filesystem cannot work without that operation.
-    pub fn open() -> Result<Self, Error> {
+    pub fn open(node: Option<&str>) -> Result<Self, Error> {
+        let want = match node {
+            Some(n) => Some(parse_node(n).ok_or_else(|| Error::BadNode(n.to_string()))?),
+            None => None,
+        };
         // The backend owns the devices, and the channels borrow the device.
         // A box gives each one a fixed address, and the code then makes the
         // lifetimes static by hand.
@@ -194,6 +293,12 @@ impl Mtp {
 
         let mut chosen = None;
         for d in backend_ref.devices() {
+            // A caller that names a device gets that device, and no other.
+            if let Some((bus, addr)) = want {
+                if d.bus() != bus || d.address() != addr {
+                    continue;
+                }
+            }
             let mut open = match d.open(4) {
                 Ok(o) => o,
                 Err(_) => continue,
@@ -226,7 +331,15 @@ impl Mtp {
             }
         }
 
-        let (open, iface) = chosen.ok_or(Error::NoDevice)?;
+        let (open, iface) = match chosen {
+            Some(v) => v,
+            None => {
+                return Err(match node {
+                    Some(n) => Error::NamedDeviceNotFound(n.to_string()),
+                    None => Error::NoDevice,
+                })
+            }
+        };
         let mut device = Box::new(open);
         if device.kernel_driver_active(iface.interface_number) {
             let _ = device.detach_kernel_driver(iface.interface_number);
