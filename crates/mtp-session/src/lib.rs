@@ -344,6 +344,62 @@ impl std::error::Error for SessionError {
     }
 }
 
+/// The switches this project reads from the environment.
+///
+/// Both programs read variables that start with `BSDROID_`. The rules for
+/// reading one live here, so the two programs agree.
+pub mod env {
+    /// Reads a switch from an environment variable.
+    ///
+    /// A variable that is absent is off. A variable that holds `0`, `no`,
+    /// `false` or `off` is also off, in any case of letters. Any other value
+    /// is on, so `=1` works and so does `=yes`.
+    ///
+    /// An earlier version of this project asked only whether the variable was
+    /// set. A person who wrote `BSDROID_USB_RESET=0` to turn the reset off
+    /// turned it on. The name says switch and the value says off, and the code
+    /// read neither.
+    pub fn flag(name: &str) -> bool {
+        match std::env::var(name) {
+            Err(_) => false,
+            Ok(v) => !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "no" | "false" | "off"
+            ),
+        }
+    }
+
+    /// Reads a whole number from an environment variable.
+    pub fn number(name: &str) -> Option<u64> {
+        std::env::var(name).ok()?.parse().ok()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::flag;
+
+        /// The test writes to the environment of the process, so one function
+        /// holds every case. Two tests that write at the same time disagree.
+        #[test]
+        fn a_switch_reads_the_value_and_not_only_the_name() {
+            let name = "BSDROID_TEST_SESSION_FLAG";
+
+            std::env::remove_var(name);
+            assert!(!flag(name), "a variable that is absent is off");
+
+            for off in ["0", "no", "false", "off", "OFF", "False", " 0 ", ""] {
+                std::env::set_var(name, off);
+                assert!(!flag(name), "{off:?} must read as off");
+            }
+            for on in ["1", "yes", "true", "on", "TRUE", "anything"] {
+                std::env::set_var(name, on);
+                assert!(flag(name), "{on:?} must read as on");
+            }
+            std::env::remove_var(name);
+        }
+    }
+}
+
 /// What a session needs from the thing underneath it.
 ///
 /// The trait exists so a test can drive the state machine with recorded bytes

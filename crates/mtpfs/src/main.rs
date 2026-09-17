@@ -904,7 +904,11 @@ unsafe extern "C" fn op_read(
 
         // BSDROID_DEBUG reports the size FUSE asks for. The size sets the count of
         // round trips a copy needs, and the count sets the rate.
-        if std::env::var("BSDROID_DEBUG").is_ok() {
+        //
+        // The flag comes from the settings, which the host read one time at
+        // startup. An earlier version read the environment here, which is
+        // once for every read a copy does.
+        if fs.mtp.settings().debug {
             eprintln!("read: offset {offset} size {size} want {want}");
         }
 

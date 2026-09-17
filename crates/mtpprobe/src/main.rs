@@ -8,6 +8,7 @@
 
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use mtp_session::{Config, Session, SessionOpen};
@@ -18,6 +19,22 @@ use usb_freebsd::discover::{self, Node};
 
 /// The deadline for one transfer.
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Says whether the host writes a line for each step.
+///
+/// The value comes from the environment one time. `display_name` runs for
+/// every object in a listing, and an earlier version read the environment in
+/// each call.
+fn debug() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| mtp_session::env::flag("BSDROID_DEBUG"))
+}
+
+/// Says whether a report hides the names of files.
+fn redact() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| mtp_session::env::flag("BSDROID_REDACT"))
+}
 
 /// The buffer size for a bulk endpoint, in bytes.
 const BULK_BUFFER: u32 = 16 * 1024;
@@ -107,7 +124,7 @@ fn connect(node: Option<Node>, quiet: bool, needs_storage: bool) -> Result<Conne
     // all. The request is therefore a repair, and not a step for each open.
     //
     // See docs/06-the-reset-that-breaks.md.
-    if std::env::var_os("BSDROID_PTP_RESET").is_some() {
+    if mtp_session::env::flag("BSDROID_PTP_RESET") {
         println!("    the host sends a device reset request");
         if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
             println!("    the device reset request failed: {e}");
@@ -269,7 +286,7 @@ fn find_mtp(
         None => return Err(no_mtp_message(backend, node)),
     };
 
-    if std::env::var_os("BSDROID_DEBUG").is_some() {
+    if debug() {
         println!(
             "  [debug] device {:#06x}:{:#06x} has {} interface(s)",
             found.vendor_id,
@@ -576,7 +593,7 @@ fn objects(node: Option<Node>) -> Result<(), String> {
                         "      {kind}  {h:#010x}  parent {:#010x}  {:>11}  {}",
                         o.parent_object,
                         o.compressed_size,
-                        display_name(&o.filename)
+                        display_name(&o.filename, redact())
                     );
                 }
                 Err(e) => println!("      the payload does not parse: {e}"),
@@ -708,7 +725,7 @@ fn bench(node: Option<Node>) -> Result<(), String> {
         println!(
             "    {:>12} bytes   {}",
             size,
-            short_name(&display_name(name))
+            short_name(&display_name(name, redact()))
         );
     }
     println!(
@@ -810,8 +827,8 @@ fn bench(node: Option<Node>) -> Result<(), String> {
 ///
 /// The redaction keeps the extension, because the extension changes how a
 /// device treats a file, and the extension is not private.
-fn display_name(name: &str) -> String {
-    if std::env::var("BSDROID_REDACT").is_err() {
+fn display_name(name: &str, hide: bool) -> String {
+    if !hide {
         return name.to_string();
     }
     match name.rsplit_once('.') {
@@ -864,7 +881,7 @@ fn caps(node: Option<Node>) -> Result<(), String> {
         .map_err(|e| format!("{e}"))?;
     // BSDROID_DEBUG prints the bytes. A fault report needs the bytes, and a
     // test fixture needs the bytes.
-    if std::env::var("BSDROID_DEBUG").is_ok() {
+    if debug() {
         println!();
         println!("--- The raw dataset, {} bytes ---", out.data.len());
         for (n, chunk) in out.data.chunks(16).enumerate() {
@@ -1053,7 +1070,7 @@ fn get(node: Option<Node>, handle: Option<u32>) -> Result<(), String> {
 
     println!();
     println!("object {target:#010x}");
-    println!("  name:   {}", display_name(&info.filename));
+    println!("  name:   {}", display_name(&info.filename, redact()));
     println!("  size:   {} bytes", info.compressed_size);
     println!("  format: {:#06x}", info.object_format);
     println!("  parent: {:#010x}", info.parent_object);
@@ -1396,42 +1413,55 @@ fn report_wedged_service() {
 mod tests {
     use super::*;
 
-    /// The tests set an environment variable, so the tests must not run at the
-    /// same time. One test function holds every case for this reason.
+    /// The redaction is a pure function, so the test needs no environment.
+    ///
+    /// An earlier version read `BSDROID_REDACT` inside `display_name`, so the
+    /// test had to write to the environment of the process. Every case had to
+    /// live in one function for that reason, because two tests that write to
+    /// the environment at the same time disagree.
     #[test]
-    fn redaction_hides_a_name_and_keeps_the_kind() {
-        // With no variable, a name passes through.
-        std::env::remove_var("BSDROID_REDACT");
-        assert_eq!(display_name("holiday.jpg"), "holiday.jpg");
-        assert_eq!(display_name("DCIM"), "DCIM");
+    fn a_name_passes_through_when_the_report_hides_nothing() {
+        assert_eq!(display_name("holiday.jpg", false), "holiday.jpg");
+        assert_eq!(display_name("DCIM", false), "DCIM");
+    }
 
-        // With the variable, a name goes and the extension stays.
-        std::env::set_var("BSDROID_REDACT", "1");
-        assert_eq!(display_name("holiday.jpg"), "<name hidden>.jpg");
-        assert_eq!(display_name("IMG_20260118_074042.jpg"), "<name hidden>.jpg");
-        assert_eq!(display_name("video.mp4"), "<name hidden>.mp4");
+    #[test]
+    fn a_hidden_name_keeps_the_extension() {
+        assert_eq!(display_name("holiday.jpg", true), "<name hidden>.jpg");
+        assert_eq!(
+            display_name("IMG_20260118_074042.jpg", true),
+            "<name hidden>.jpg"
+        );
+        assert_eq!(display_name("video.mp4", true), "<name hidden>.mp4");
+    }
 
-        // A folder has no extension, so nothing remains.
-        assert_eq!(display_name("DCIM"), "<name hidden>");
-        assert_eq!(display_name("Pictures"), "<name hidden>");
+    #[test]
+    fn a_folder_has_no_extension_to_keep() {
+        assert_eq!(display_name("DCIM", true), "<name hidden>");
+        assert_eq!(display_name("Pictures", true), "<name hidden>");
+    }
 
-        // A long tail is not an extension, and the name must not leak through
-        // it.
-        assert_eq!(display_name("name.averylongtail"), "<name hidden>");
+    /// A long tail is not an extension, and the name must not leak through it.
+    #[test]
+    fn a_long_tail_is_not_an_extension() {
+        assert_eq!(display_name("name.averylongtail", true), "<name hidden>");
+    }
 
-        // A name that ends with a dot holds no extension.
-        assert_eq!(display_name("odd."), "<name hidden>");
+    #[test]
+    fn a_name_that_ends_with_a_dot_holds_no_extension() {
+        assert_eq!(display_name("odd.", true), "<name hidden>");
+    }
 
-        // A name that starts with a dot holds no extension. The text after the
-        // dot is the name itself, so the redaction must hide the text.
-        //
-        // A first version of this test expected "<name hidden>.thumbnails".
-        // That answer leaks the name through the field for the extension. The
-        // length limit above stops the leak, and this test guards the limit.
-        assert_eq!(display_name(".thumbnails"), "<name hidden>");
-        assert_eq!(display_name(".secret"), "<name hidden>.secret");
-
-        std::env::remove_var("BSDROID_REDACT");
+    /// A name that starts with a dot holds no extension. The text after the
+    /// dot is the name itself, so the redaction must hide the text.
+    ///
+    /// A first version of this test expected `<name hidden>.thumbnails`. That
+    /// answer leaks the name through the field for the extension. The length
+    /// limit stops the leak, and this test guards the limit.
+    #[test]
+    fn a_name_that_starts_with_a_dot_does_not_leak() {
+        assert_eq!(display_name(".thumbnails", true), "<name hidden>");
+        assert_eq!(display_name(".secret", true), "<name hidden>.secret");
     }
 
     #[test]

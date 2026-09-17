@@ -97,12 +97,12 @@ impl Settings {
     pub fn from_env() -> Self {
         let mut s = Self::default();
 
-        if let Some(n) = env_number("BSDROID_TIMEOUT") {
+        if let Some(n) = mtp_session::env::number("BSDROID_TIMEOUT") {
             if n > 0 {
                 s.timeout = Duration::from_secs(n);
             }
         }
-        if let Some(n) = env_number("BSDROID_WRITE_CHUNK") {
+        if let Some(n) = mtp_session::env::number("BSDROID_WRITE_CHUNK") {
             // `Config::normalised` rounds the count to whole USB packets, so
             // this code takes any count above zero.
             if n > 0 {
@@ -110,35 +110,10 @@ impl Settings {
             }
         }
 
-        s.debug = env_flag("BSDROID_DEBUG");
-        s.no_proplist = env_flag("BSDROID_NO_PROPLIST");
-        s.usb_reset = env_flag("BSDROID_USB_RESET");
+        s.debug = mtp_session::env::flag("BSDROID_DEBUG");
+        s.no_proplist = mtp_session::env::flag("BSDROID_NO_PROPLIST");
+        s.usb_reset = mtp_session::env::flag("BSDROID_USB_RESET");
         s
-    }
-}
-
-/// Reads a whole number from an environment variable.
-fn env_number(name: &str) -> Option<u64> {
-    std::env::var(name).ok()?.parse().ok()
-}
-
-/// Reads a switch from an environment variable.
-///
-/// A variable that is absent is off. A variable that holds `0`, `no`, `false`
-/// or `off` is also off, in any case of letters. Any other value is on, so
-/// `BSDROID_DEBUG=1` works and so does `BSDROID_DEBUG=yes`.
-///
-/// An earlier version asked only whether the variable was set. A person who
-/// wrote `BSDROID_USB_RESET=0` to turn the reset off turned it on, which is
-/// the opposite of what the name and the value say. This was found when a
-/// test harness did exactly that.
-fn env_flag(name: &str) -> bool {
-    match std::env::var(name) {
-        Err(_) => false,
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "" | "0" | "no" | "false" | "off"
-        ),
     }
 }
 
@@ -484,6 +459,11 @@ impl Mtp {
         Ok(m)
     }
 
+    /// The settings this mount runs with.
+    pub fn settings(&self) -> Settings {
+        self.settings
+    }
+
     /// The name of the device, for a person to read.
     pub fn name(&self) -> String {
         format!("{} {}", self.info.manufacturer, self.info.model)
@@ -502,7 +482,7 @@ impl Mtp {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     self.fast_list = false;
-                    if std::env::var_os("BSDROID_DEBUG").is_some() {
+                    if self.settings.debug {
                         eprintln!(
                             "mtpfs: GetObjectPropList failed, and the older way follows: {e}"
                         );
@@ -551,7 +531,7 @@ impl Mtp {
         }
 
         let raw = ptp_proto::fold_prop_list(&entries);
-        if std::env::var_os("BSDROID_DEBUG").is_some() {
+        if self.settings.debug {
             eprintln!(
                 "mtpfs: proplist folder arg={arg} gave {} records",
                 raw.len()
@@ -1022,33 +1002,6 @@ impl Drop for Mtp {
                 eprintln!("mtpfs: the USB reset failed: {e}");
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod flag_tests {
-    use super::env_flag;
-
-    /// The tests write to the environment of the process, so they must not run
-    /// at the same time. One function holds every case for that reason.
-    #[test]
-    fn a_switch_reads_the_value_and_not_only_the_name() {
-        let name = "BSDROID_TEST_FLAG";
-
-        std::env::remove_var(name);
-        assert!(!env_flag(name), "a variable that is absent is off");
-
-        for off in ["0", "no", "false", "off", "OFF", "False", " 0 ", ""] {
-            std::env::set_var(name, off);
-            assert!(!env_flag(name), "{off:?} must read as off");
-        }
-
-        for on in ["1", "yes", "true", "on", "TRUE", "anything"] {
-            std::env::set_var(name, on);
-            assert!(env_flag(name), "{on:?} must read as on");
-        }
-
-        std::env::remove_var(name);
     }
 }
 
