@@ -136,6 +136,8 @@ sum, for a file of 290 KB and for a file of 450 MB.
 accepts each request and changes nothing. A fault there stops a copy, and a
 copy is the job.
 
+`docs/10-what-works.md` holds the full list, with each limit and the reason.
+
 ## Build and use
 
 ```
@@ -211,6 +213,7 @@ faults were in this project, and each document says so.
 | `docs/07-filesystem-design.md`     | The design of the filesystem                |
 | `docs/08-what-libmtp-knows.md`     | What the `libmtp` database already knew     |
 | `docs/09-the-other-tools.md`       | The measurements of the other programs      |
+| `docs/10-what-works.md`            | What works, what does not, and what is slow |
 
 The files in `docs/` use Simplified Technical English (ASD-STE100), because
 many readers of this project read English as a second language.
