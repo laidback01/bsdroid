@@ -338,6 +338,37 @@ sh tools/capture-device.sh <a name for your device>
 The script hides each file name. Read the file in `docs/captures` before you
 send the file.
 
+### Checks that need a cellphone
+
+Two faults in this project could not be found by a test, because a test cannot
+make hardware leave the bus. These two checks can.
+
+```
+sh tools/check-write-errors.sh /mnt/phone ugen0.11
+```
+
+Asks one question: does a write that fails reach the program that wrote it?
+The check needs no cable in anybody's hand, and it moves no bytes. It takes ten
+seconds. `mtpfs` once reported success for a file that never left the host. See
+`docs/07-filesystem-design.md`.
+
+```
+sh tools/chaos-cable.sh /mnt/phone 04e8:6860 write 600
+```
+
+Needs a person with a cable. Pull the cable at any moment, as often as you
+like, and put it back. The check reads or writes the whole time, and it counts
+four outcomes:
+
+| Outcome                                      | What it means                   |
+| -------------------------------------------- | ------------------------------- |
+| a command fails                              | a pass, the cellphone is gone   |
+| a command never returns                      | the fault this project avoids   |
+| a write holds wrong bytes                    | worse than a fault              |
+| a write reports success after a reported one | the program was told a lie      |
+
+Run `mtpfs -l` for the vendor and the product of a cellphone.
+
 ## How this was built
 
 Claude Code and I wrote this together, over one long session. I supplied the
