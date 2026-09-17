@@ -29,9 +29,10 @@ three devices. The class is not.
 The class agrees on two devices of three. The name agrees on three of three,
 across two chip makers.
 
-The project does not yet search by name alone, because two devices give the
-standard class and the standard class needs no request. A fourth device that
-gives a third class would change this.
+The project does not yet search by name alone. Two devices give the standard
+class, and the standard class needs no request to the device.
+
+A fourth device with a third class changes this answer.
 
 ## The rule that failed
 
@@ -80,8 +81,8 @@ The Cyrus CS 24 gives one interface, and the interface carries MTP. The device
 gives no adb interface, because the owner did not turn on USB debugging.
 
 This matters for a fault message. The project tells an Android user that a
-device is not in file transfer mode, and the project knows the device is
-Android because of the adb interface.
+device is not in file transfer mode. The adb interface is how the project knows
+that a device is Android.
 
 A device with no adb interface, and no MTP interface, gives the host nothing to
 recognise. The message is then a general one. The project has no better answer
