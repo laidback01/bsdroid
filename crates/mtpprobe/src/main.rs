@@ -216,13 +216,15 @@ fn no_mtp_message(backend: &Backend) -> String {
     let mut m = String::from("an Android device is connected, and the device gives no MTP\n");
     m.push_str("  interface. The device shows the adb interface, so the device is\n");
     m.push_str("  awake and the cable carries data.\n\n");
-    m.push_str("  The device does not carry files. On the telephone:\n");
+    m.push_str("  Put the telephone into file transfer mode:\n");
     m.push_str("    1. Open the notification area.\n");
     m.push_str("    2. Find the USB notification.\n");
-    m.push_str("    3. Choose the option that holds the word `file`. Each\n");
-    m.push_str("       telephone names the option differently, such as\n");
-    m.push_str("       `Transferring Files / Android Auto`, or `File Transfer`,\n");
-    m.push_str("       or `Transfer files`.\n\n");
+    m.push_str("    3. Choose file transfer.\n\n");
+    m.push_str("  The name is not the same on each telephone. These are the\n");
+    m.push_str("  names the project has seen:\n");
+    m.push_str("    Transferring Files / Android Auto\n");
+    m.push_str("    File Transfer\n");
+    m.push_str("    Transfer files\n\n");
     for d in &android_without_mtp {
         m.push_str(&format!("  device: {d}\n"));
     }
@@ -953,10 +955,11 @@ fn caps() -> Result<(), String> {
     Ok(())
 }
 
-/// Tells a user how to find the mode that carries files.
+/// Tells a user to put a telephone into file transfer mode.
 ///
-/// The name of the mode is not the same on each telephone. Three test devices
-/// give three names, and no name agrees with another:
+/// The instruction leads with the job, and not with a name. No name agrees
+/// across the three test devices, so a name is an example and not an
+/// instruction.
 ///
 /// ```text
 /// Samsung SM-S901U      Transferring Files / Android Auto
@@ -964,17 +967,19 @@ fn caps() -> Result<(), String> {
 /// Motorola Moto G (5)   Transfer files
 /// ```
 ///
-/// A list of names is therefore the wrong help. Each name holds the word
-/// `file`, so the word is the help that works.
+/// This project needs file transfer mode alone. A telephone also gives modes
+/// for MIDI and for tethering, and this project never needs one of those. The
+/// message does not name them.
 ///
 /// See `docs/02-device-states.md`.
 fn print_file_mode_names(indent: &str) {
-    println!("{indent}Look for the option that holds the word `file`. Each");
-    println!("{indent}telephone gives the option a different name:");
+    println!("{indent}Put the telephone into file transfer mode.");
+    println!();
+    println!("{indent}The name is not the same on each telephone. These are the");
+    println!("{indent}names the project has seen:");
     println!("{indent}  Transferring Files / Android Auto");
     println!("{indent}  File Transfer");
     println!("{indent}  Transfer files");
-    println!("{indent}Some telephones write `MTP` in place of a name.");
 }
 
 /// Reads a handle from the command line. The text is decimal or hexadecimal.
@@ -1258,8 +1263,7 @@ fn report_no_storage(w: &StorageWait) {
     println!();
     println!("    Do these two things on the phone, in this order:");
     println!("      1. Unlock the screen.");
-    println!("      2. Open the USB notification, and choose the mode that");
-    println!("         carries files.");
+    println!("      2. Put the telephone into file transfer mode.");
     println!();
     print_file_mode_names("         ");
     println!();

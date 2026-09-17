@@ -560,12 +560,12 @@ fn report_wedged_service() {
     println!("    If the request does not help, restart the MTP service on the");
     println!("    phone:");
     println!("      1. Open the USB notification.");
-    println!("      2. Choose the option that holds the word `charge`, or the");
-    println!("         option that says `No data transfer`.");
-    println!("      3. Choose the option that holds the word `file` again.");
+    println!("      2. Put the telephone into charge only mode.");
+    println!("      3. Put the telephone into file transfer mode again.");
     println!();
-    println!("    Each telephone names the options differently. The word in the");
-    println!("    name is the part that does not change.");
+    println!("    The name of a mode is not the same on each telephone. A");
+    println!("    telephone writes `Charging phone only`, or `No data transfer`,");
+    println!("    or `Charge this device` for the first one.");
     println!();
     println!("    A restart of the phone also works, and takes longer.");
 }
