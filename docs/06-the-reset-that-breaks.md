@@ -73,3 +73,40 @@ The project checks this rule for each step at the start of a session:
 | Device reset request, 0x66 | no, and the step is NOT safe         |
 
 The last row is the one this document exists for.
+
+## The same fault, a second time
+
+The rule caught a second step, and the second step was already in the project.
+
+`Session::new` reads and drops the bytes a stopped program leaves behind. The
+first version used a deadline of 250 milliseconds for each read. An endpoint
+with nothing on it gives nothing, and the read waits for the whole deadline.
+
+A session on a Samsung SM-S901U:
+
+| The host drains at the start | Mean time for one cycle |
+| ---------------------------- | ----------------------- |
+| yes, 250 ms deadline         | 290 ms                  |
+| no                           | 29 ms                   |
+| yes, 15 ms first deadline    | 48 ms                   |
+
+The first read now uses 15 milliseconds. A device that holds bytes answers at
+once, because the bytes are already there. The host then uses a longer deadline
+for the rest.
+
+### What the fault did to a measurement
+
+The project reported one cycle at 23 milliseconds for a Samsung, and 270
+milliseconds for two other telephones.
+
+The 23 millisecond measurement came from a version with no drain. The 270
+millisecond measurements came from a version with the drain. The numbers do not
+compare, and the difference is the drain.
+
+The project used that difference to argue about the design of a filesystem. The
+argument rested on a number that the project made.
+
+### The rule, again
+
+Measure a change against the same code. A number from an older version of a
+program is a number about that version.

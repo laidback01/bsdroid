@@ -61,6 +61,17 @@ fn read_buffer_size() -> usize {
 /// field, and not against a large file. A video of 8 GB is a real file.
 const MAX_DATA_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
+/// The deadline for the first read of a drain, in milliseconds.
+///
+/// The value must be small. An endpoint with nothing on it costs this much
+/// time at each session start.
+const DRAIN_FIRST_MILLIS: u64 = 15;
+
+/// The deadline for each read of a drain after the first, in milliseconds.
+///
+/// The host uses this value only after the device gives bytes.
+const DRAIN_REST_MILLIS: u64 = 250;
+
 /// The largest count of reads for one data phase.
 ///
 /// Rule 1 says that a loop must not depend on the device for the end
@@ -213,7 +224,14 @@ impl<'a> Session<'a> {
         };
         // A program that stopped in the middle of a transfer can leave the
         // device with bytes to send. Start from a known state.
-        let dropped = s.recover();
+        //
+        // BSDROID_NO_RECOVER skips the step. The variable answers one
+        // question: what does the step cost on a device that works?
+        let dropped = if std::env::var("BSDROID_NO_RECOVER").is_ok() {
+            0
+        } else {
+            s.recover()
+        };
         if dropped > 0 {
             println!("    the device still held {dropped} bytes, and the host dropped them");
         }
@@ -404,14 +422,29 @@ impl<'a> Session<'a> {
         let mut buf = vec![0u8; buf_size];
         let mut dropped = 0u64;
 
-        // A short deadline, because an empty endpoint must not cost the full
-        // deadline on each round.
-        let short = Duration::from_millis(250);
+        // The first read decides whether the device holds anything. On a
+        // device that works, the endpoint is empty, and the read waits for the
+        // whole deadline and gives nothing.
+        //
+        // The first deadline is therefore very short. A device that holds
+        // bytes answers at once, because the bytes are already there.
+        //
+        // An earlier version used 250 ms for every read. A session then cost
+        // 290 ms in place of 29 ms, and the project reported the cost as a
+        // property of the device. See docs/06-the-reset-that-breaks.md.
+        let first = Duration::from_millis(DRAIN_FIRST_MILLIS);
+        let rest = Duration::from_millis(DRAIN_REST_MILLIS);
 
+        let mut deadline = first;
         for _ in 0..MAX_READ_ROUNDS {
-            match self.channels.read.read(&mut buf, short) {
+            match self.channels.read.read(&mut buf, deadline) {
                 Ok(0) => break,
-                Ok(n) => dropped += n as u64,
+                Ok(n) => {
+                    dropped += n as u64;
+                    // The device holds bytes, so a longer deadline is right
+                    // for the rest.
+                    deadline = rest;
+                }
                 Err(_) => break,
             }
         }

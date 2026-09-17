@@ -1,0 +1,270 @@
+# Device capture: samsung-s22
+# node: ugen0.11
+
+## usbconfig
+ugen0.11: <Galaxy series, misc. (MTP mode) Samsung Electronics Co., Ltd> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (500mA)
+
+
+## device descriptor
+REQUEST = <0x12 0x01 0x10 0x02 0x00 0x00 0x00 0x40 0xe8 0x04 0x60 0x68 0x04 0x05 0x01 0x02 0x03 0x01><@`h>
+
+## BOS descriptor, which says what speeds the device supports
+REQUEST = <0x05 0x0f 0x16 0x00 0x02 0x07 0x10 0x02 0x1e 0x21 0x00 0x00 0x0a 0x10 0x03 0x00 0x0f 0x00 0x01 0x0a 0xff 0x01><!>
+
+## configuration descriptor
+REQUEST = <0x09 0x02 0x88 0x00 0x04 0x01 0x04 0x80 0xfa 0x09 0x04 0x00 0x00 0x03 0x06 0x01 0x01 0x05 0x07 0x05 0x81 0x02 0x00 0x02 0x00 0x07 0x05 0x01 0x02 0x00 0x02 0x00 0x07 0x05 0x82 0x03 0x1c 0x00 0x06 0x08 0x0b 0x01 0x02 0x02 0x02 0x01 0x08 0x09 0x04 0x01 0x00 0x01 0x02 0x02 0x01 0x06 0x05 0x24 0x00 0x10 0x01 0x05 0x24 0x01 0x00 0x02 0x04 0x24 0x02 0x02 0x05 0x24 0x06 0x01 0x02 0x07 0x05 0x84 0x03 0x0a 0x00 0x09 0x09 0x04 0x02 0x00 0x02 0x0a 0x00 0x00 0x07 0x07 0x05 0x83 0x02 0x00 0x02 0x00 0x07 0x05 0x02 0x02 0x00 0x02 0x00 0x09 0x04 0x03 0x00 0x02 0xff 0x42 0x01 0x0a 0x07 0x05 0x03 0x02 0x00 0x02 0x00 0x07 0x05 0x85 0x02 0x00 0x02 0x00 0x08 0x24 0x80 0x0c 0x00 0x01 0x00 0x01><$$$$B$>
+
+## interface classes
+    bNumInterfaces = 0x0004 
+      bInterfaceClass = 0x0006  <Still imaging>
+      bInterfaceSubClass = 0x0001 
+      bInterfaceProtocol = 0x0001 
+      bInterfaceClass = 0x0002  <Communication device>
+      bInterfaceSubClass = 0x0002 
+      bInterfaceProtocol = 0x0001 
+      bInterfaceClass = 0x000a  <CDC-data>
+      bInterfaceSubClass = 0x0000 
+      bInterfaceProtocol = 0x0000 
+      bInterfaceClass = 0x00ff  <Vendor specific>
+      bInterfaceSubClass = 0x0042 
+      bInterfaceProtocol = 0x0001 
+
+## sys.usb.config, if adb answers
+mtp,adb
+
+## mtpprobe caps
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x04e8, product 0x6860
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+--- The device ---
+    manufacturer:  samsung
+    model:         SM-S901U
+    version:       S901USQSAGZH3
+    standard:      1.0
+    vendor extension: microsoft.com: 1.0; samsung.com/kies: 6.0; samsung.com/devicestatus: 0;
+
+--- What a filesystem needs ---
+    yes   read part of a file     a read asks for an offset, and GetObject gives the whole file
+    yes   write a new file        SendObjectInfo and SendObject
+    yes   remove a file           DeleteObject
+    yes   read a folder fast      GetObjectPropList, one operation for a whole folder
+
+--- The operations the device supports ---
+    35 operations
+      GetDeviceInfo OpenSession CloseSession GetStorageIDs GetStorageInfo 
+      GetNumObjects GetObjectHandles GetObjectInfo GetObject GetThumb 
+      DeleteObject SendObjectInfo SendObject 0x1010 GetDevicePropDesc 
+      GetDevicePropValue SetDevicePropValue 0x1017 MoveObject CopyObject 
+      GetPartialObject GetObjectPropsSupported GetObjectPropDesc 
+      GetObjectPropValue SetObjectPropValue GetObjectPropList 
+      SetObjectReferences GetPartialObject64 SendPartialObject 
+      TruncateObject64 BeginEditObject EndEditObject 0x9501 0x9502 0x9503 
+
+RESULT: pass.
+
+## mtpprobe probe
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x04e8, product 0x6860
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+--- Session 1 ---
+    OpenSession           2 ms   0x2001 OK
+    GetStorageIDs         1 ms   1 attempt(s)   1 storage(s)
+      storages: [65537]
+    GetStorageInfo        1 ms   0x2001 OK   62 data bytes
+      description: Internal storage
+      capacity:    239935107072 bytes
+      free:        205466046464 bytes
+    CloseSession          0 ms   0x2001 OK   0 data bytes
+
+--- Session 2: a second PTP session ---
+    OpenSession           0 ms   0x2001 OK
+
+The device answers over MTP.
+
+RESULT: pass.
+
+## mtpprobe objects
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x04e8, product 0x6860
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+storage 0x00010001
+
+--- GetObjectHandles with parent 0x00000000 ---
+       770 ms   2059 objects   8240 data bytes   1 read(s)
+    the first 12 objects:
+      folder  0x00000007  parent 0x00000000            0  <name hidden>
+      folder  0x0000000c  parent 0x00000000            0  <name hidden>
+      folder  0x00000005  parent 0x00000000            0  <name hidden>
+      folder  0x0000000d  parent 0x00000000            0  <name hidden>
+      folder  0x00000002  parent 0x00000000            0  <name hidden>
+      folder  0x00000001  parent 0x00000000            0  <name hidden>
+      folder  0x0000000b  parent 0x00000000            0  <name hidden>
+      folder  0x00000003  parent 0x00000000            0  <name hidden>
+      folder  0x00000008  parent 0x00000000            0  <name hidden>
+      folder  0x0000000a  parent 0x00000000            0  <name hidden>
+      folder  0x00000006  parent 0x00000000            0  <name hidden>
+      folder  0x00000009  parent 0x00000000            0  <name hidden>
+      of the first 12: 12 folder(s), 0 file(s)
+
+--- GetObjectHandles with parent 0xffffffff ---
+         0 ms   13 objects   56 data bytes   1 read(s)
+    the first 12 objects:
+      folder  0x00000007  parent 0x00000000            0  <name hidden>
+      folder  0x0000000c  parent 0x00000000            0  <name hidden>
+      folder  0x00000005  parent 0x00000000            0  <name hidden>
+      folder  0x0000000d  parent 0x00000000            0  <name hidden>
+      folder  0x00000002  parent 0x00000000            0  <name hidden>
+      folder  0x00000001  parent 0x00000000            0  <name hidden>
+      folder  0x0000000b  parent 0x00000000            0  <name hidden>
+      folder  0x00000003  parent 0x00000000            0  <name hidden>
+      folder  0x00000008  parent 0x00000000            0  <name hidden>
+      folder  0x0000000a  parent 0x00000000            0  <name hidden>
+      folder  0x00000006  parent 0x00000000            0  <name hidden>
+      folder  0x00000009  parent 0x00000000            0  <name hidden>
+      of the first 12: 12 folder(s), 0 file(s)
+
+RESULT: pass.
+
+## mtpprobe reopen 10
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+--- USB device open and close cycle ---
+The test opens the USB device, reads the storage, and closes the
+device. The test repeats the cycle 10 times.
+
+simple-mtpfs uses this pattern, and simple-mtpfs stops. The PTP
+session cycle already works. See docs/00-why.md.
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x04e8, product 0x6860
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+  cycle   1/10      279 ms   1 storage(s)
+  cycle   2/10      272 ms   1 storage(s)
+  cycle   3/10      279 ms   1 storage(s)
+  cycle   4/10      278 ms   1 storage(s)
+  cycle   5/10      285 ms   1 storage(s)
+  cycle   6/10      286 ms   1 storage(s)
+  cycle   7/10      283 ms   1 storage(s)
+  cycle   8/10      276 ms   1 storage(s)
+  cycle   9/10      281 ms   1 storage(s)
+  cycle  10/10      276 ms   1 storage(s)
+
+  cycles:  10
+  slowest: 286 ms
+  mean:    280 ms
+
+Every cycle finished. The USB device open and close cycle does not
+stop the host when the host uses libusb20.
+
+RESULT: pass.
+
+## mtpprobe bench
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x04e8, product 0x6860
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+--- The link ---
+    speed: high, USB 2.0 (480 Mbit each second)
+    a bulk transfer on this link reaches about 40 MiB/s
+
+    The estimate is a guide, and not a standard. A rate near the
+    estimate means the link limits the copy, and the code does not.
+
+    The device says it supports super speed, and the link
+    runs at high speed. The device is not the limit.
+
+    The BOS descriptor of the device gives this answer. The
+    answer does not change with the cable, so the answer is
+    about the device alone.
+
+    The cable or the port is the limit. A cable for a
+    telephone often holds no super speed wires, and the plug
+    looks the same as a cable that does.
+
+--- The test files ---
+          141717 bytes   <name hidden>.heic
+         5484928 bytes   <name hidden>.jpg
+        39836894 bytes   <name hidden>.mp4
+    chosen from 104 files in the first 120 objects
+
+--- The rates ---
+    Each row reads the whole file 3 times, and gives the best.
+    The host writes the bytes nowhere, so the disk does not count.
+
+            size  read size    reads        best  of est.
+          141717      4 KiB       35     11.8 MiB/s      30%
+          141717     16 KiB        9     11.5 MiB/s      29%
+          141717     64 KiB        3     11.1 MiB/s      28%
+          141717    256 KiB        1     10.8 MiB/s      27%
+         5484928      4 KiB     1340     25.0 MiB/s      62%
+         5484928     16 KiB      335     32.3 MiB/s      81%
+         5484928     64 KiB       84     33.1 MiB/s      83%
+         5484928    256 KiB       21     36.4 MiB/s      91%
+        39836894      4 KiB     9726     29.9 MiB/s      75%
+        39836894     16 KiB     2432     33.2 MiB/s      83%
+        39836894     64 KiB      608     34.0 MiB/s      85%
+        39836894    256 KiB      152     34.0 MiB/s      85%
+
+--- How to read this ---
+    A small file gives a low rate. The cost of one operation does
+    not change with the size, so the cost counts for more.
+
+    A larger read size gives a higher rate, up to a limit. The
+    limit is the link, or the device.
+
+    A rate far under the estimate, with a large file and a large
+    read size, points at the hub chain or the cable.
+
+RESULT: pass.

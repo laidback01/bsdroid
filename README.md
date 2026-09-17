@@ -72,7 +72,14 @@ The project needs reports from many devices. At present the project has three:
 | Super speed capability   | yes              | no                  | no             |
 | Objects on the storage   | 2059             | 57                  | 8656           |
 | Rate, 64 KiB reads       | 32.1 MiB/s       | 28.2 MiB/s          | 39.4 MiB/s     |
-| One open and close cycle | 23 ms            | 270 ms              | 267 ms         |
+| One open and close cycle | 48 ms            | not measured again  | not measured again |
+
+The three measurements of a cycle do not compare. Each one came from a
+different version of this project, and one version held a drain that cost 250
+milliseconds. See `docs/06-the-reset-that-breaks.md`.
+
+The 48 millisecond value comes from the version in the tree. The other two
+devices need a new measurement.
 
 ### What the three devices settle
 
