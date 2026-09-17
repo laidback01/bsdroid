@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ptp-proto", "crates/usb-freebsd", "crates/mtpprobe"]
+members = ["crates/ptp-proto", "crates/usb-freebsd", "crates/mtpprobe", "crates/mtpfs"]
 
 [workspace.package]
 version = "0.0.1"

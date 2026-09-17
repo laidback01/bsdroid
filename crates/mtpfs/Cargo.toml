@@ -1,0 +1,16 @@
+[package]
+name = "mtpfs"
+description = "A filesystem for an Android device, over MTP."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ptp-proto = { path = "../ptp-proto" }
+usb-freebsd = { path = "../usb-freebsd" }
+
+[lib]
+name = "mtpfs"
+path = "src/lib.rs"
