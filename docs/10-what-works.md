@@ -383,3 +383,41 @@ See `docs/05-finding-the-interface.md`, and send a report:
 ```
 BSDROID_DEBUG=1 mtpprobe probe
 ```
+
+## What a pulled cable does
+
+A person pulled the USB cable while the host read and while the host wrote.
+The cellphone left the bus in the middle of a transfer, came back, and the
+person repeated that many times. One cable in the set has a bad contact, and
+that cable went in as well.
+
+The question is the one `docs/00-why.md` asks. Does a command come back?
+
+| Path  | Cellphone           | Mounts | Faults | Hangs | Wrong bytes |
+| ----- | ------------------- | ------ | ------ | ----- | ----------- |
+| read  | Cyrus CS 24         | 5      | 5      | 0     | n/a         |
+| write | Cyrus CS 24         | 3      | 2      | 0     | 0           |
+| write | Samsung SM-S901U    | 5      | 4      | 0     | 0           |
+| write | Motorola Moto G (5) | 4      | 3      | 0     | 0           |
+
+A fault is a pass. The cellphone is gone, so a command that refuses is right.
+A command that never comes back is the defect this project exists to avoid.
+
+Every command came back. The slowest read took 1 second, and the deadline is
+45 seconds. A read of a device that is gone does not wait for the deadline: it
+fails at once, because the transfer reports that the device is gone.
+
+The mount recovered by itself each time. The host found the cellphone again in
+about one second after the cellphone came back.
+
+### What this test found
+
+The write test found a defect on its first cycle, and the defect was not in
+the loop. `mtpfs` sent the object from the FUSE callback `release`, and the
+kernel throws away the answer of `release`. A copy that never reached the
+cellphone reported success. See `docs/07-filesystem-design.md`.
+
+No test in this project finds that. A test cannot make hardware leave the bus.
+When nothing fails, the callback looks correct.
+
+`tools/chaos-cable.sh` holds the test. It needs a person with a cable.

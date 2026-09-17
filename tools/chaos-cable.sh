@@ -131,7 +131,7 @@ while [ $(( $(date +%s) - START )) -lt "$RUN_FOR" ]; do
 
     run_failures=0
     while [ $(( $(date +%s) - START )) -lt "$RUN_FOR" ]; do
-        before=$(grep -c "cannot write" "$LOG" 2>/dev/null || echo 0)
+        before=$(grep -c "cannot write" "$LOG" 2>/dev/null); before=${before:-0}
         t0=$(date +%s)
 
         if [ "$MODE" = write ]; then
@@ -141,7 +141,7 @@ while [ $(( $(date +%s) - START )) -lt "$RUN_FOR" ]; do
             if timeout -k 5 45 cat "$T" >/dev/null 2>&1; then rc=0; else rc=$?; fi
         fi
 
-        after=$(grep -c "cannot write" "$LOG" 2>/dev/null || echo 0)
+        after=$(grep -c "cannot write" "$LOG" 2>/dev/null); after=${after:-0}
         took=$(( $(date +%s) - t0 ))
         [ "$took" -gt "$slowest" ] && slowest=$took
 
