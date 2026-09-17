@@ -122,10 +122,11 @@ impl Tree {
 
             let found = self.children_named(current, part);
             match found {
-                Some(e) => {
-                    // A part in the middle of a path must name a folder.
-                    current = e.handle;
-                }
+                // A part in the middle of a path should name a folder. The
+                // tree does not check that, because a caller that asks the
+                // device to list a file gets a fault from the device, and
+                // that fault carries more than a guess here would.
+                Some(e) => current = e.handle,
                 None => return Lookup::NotFound,
             }
         }
@@ -161,16 +162,6 @@ impl Tree {
             current = e.parent;
         }
         None
-    }
-
-    /// Gives the count of objects the tree holds.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Tells you if the tree holds no object.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 
     /// Forgets a listing, and keeps the objects.

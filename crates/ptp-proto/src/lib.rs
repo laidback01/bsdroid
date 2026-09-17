@@ -199,30 +199,25 @@ impl<'a> Container<'a> {
     /// The function checks the length field against the buffer size. The check
     /// stops a damaged device from making the host read past the buffer.
     pub fn parse(buf: &'a [u8]) -> Result<Self, ParseError> {
-        if buf.len() < HEADER_LEN {
-            return Err(ParseError::ShortHeader { got: buf.len() });
-        }
-
-        let length = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        let kind = ContainerType::from_wire(u16::from_le_bytes([buf[4], buf[5]]))?;
-        let code = u16::from_le_bytes([buf[6], buf[7]]);
-        let transaction_id = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+        // `Header::parse` reads the four fields, so this function holds only
+        // the check that a header alone cannot make.
+        let h = Header::parse(buf)?;
 
         // The length must cover the header, and the buffer must hold the
         // bytes the length declares.
-        let declared = length as usize;
+        let declared = h.length as usize;
         if declared < HEADER_LEN || declared > buf.len() {
             return Err(ParseError::LengthMismatch {
-                declared: length,
+                declared: h.length,
                 available: buf.len(),
             });
         }
 
         Ok(Self {
-            length,
-            kind,
-            code,
-            transaction_id,
+            length: h.length,
+            kind: h.kind,
+            code: h.code,
+            transaction_id: h.transaction_id,
             payload: &buf[HEADER_LEN..declared],
         })
     }
@@ -271,16 +266,7 @@ pub fn parse_u32_array(data: &[u8]) -> Result<Vec<u32>, ParseError> {
 ///
 /// A caller outside this crate needs the function for the value of an object
 /// property, which is a string with no dataset around it.
-pub fn push_ptp_string(out: &mut Vec<u8>, s: &str) {
-    push_string(out, s)
-}
-
-/// Writes a PTP string into a buffer.
-///
-/// The first byte holds the character count, and the count includes the
-/// terminator. The characters are UTF-16 little-endian. An empty string gives
-/// one byte of 0, and no characters.
-fn push_string(out: &mut Vec<u8>, s: &str) {
+pub fn push_string(out: &mut Vec<u8>, s: &str) {
     if s.is_empty() {
         out.push(0);
         return;
@@ -288,9 +274,16 @@ fn push_string(out: &mut Vec<u8>, s: &str) {
     let units: Vec<u16> = s.encode_utf16().collect();
 
     // The count byte holds the characters and the terminator. A name longer
-    // than 254 characters does not fit, so the function cuts the name.
+    // than 254 code units does not fit, so the function cuts the name.
+    //
+    // The cut must not fall between the two halves of a surrogate pair. A
+    // lone half is not valid UTF-16, and a device that reads the name then
+    // sees a damaged string. The loop steps back over a leading surrogate.
     let max = 254usize;
-    let take = core::cmp::min(units.len(), max);
+    let mut take = core::cmp::min(units.len(), max);
+    if take < units.len() && take > 0 && (0xd800..0xdc00).contains(&units[take - 1]) {
+        take -= 1;
+    }
     out.push((take + 1) as u8);
     for u in &units[..take] {
         out.extend_from_slice(&u.to_le_bytes());
@@ -498,12 +491,23 @@ impl<'a> Reader<'a> {
         String::from_utf16(&units).map_err(|_| ParseError::BadString { field })
     }
 
-    /// Reads a PTP array of `u16`.
-    fn read_u16_array(&mut self, field: &'static str) -> Result<Vec<u16>, ParseError> {
+    /// Reads a PTP array.
+    ///
+    /// A PTP array starts with a `u32` element count, and the elements follow.
+    /// `read` reads one element and `width` is its size in bytes.
+    ///
+    /// The function checks the count against the buffer before it reserves
+    /// memory. A damaged count of 0xffffffff must not make the host ask for
+    /// 16 GiB.
+    fn read_array<T>(
+        &mut self,
+        field: &'static str,
+        width: usize,
+        read: fn(&mut Self, &'static str) -> Result<T, ParseError>,
+    ) -> Result<Vec<T>, ParseError> {
         let count = self.read_u32(field)? as usize;
 
-        // Check the count against the buffer before the allocation.
-        let need = count.checked_mul(2).ok_or(ParseError::Truncated {
+        let need = count.checked_mul(width).ok_or(ParseError::Truncated {
             field,
             need: usize::MAX,
             got: self.remaining(),
@@ -518,35 +522,19 @@ impl<'a> Reader<'a> {
 
         let mut out = Vec::with_capacity(count);
         for _ in 0..count {
-            out.push(self.read_u16(field)?);
+            out.push(read(self, field)?);
         }
         Ok(out)
     }
 
+    /// Reads a PTP array of `u16`.
+    fn read_u16_array(&mut self, field: &'static str) -> Result<Vec<u16>, ParseError> {
+        self.read_array(field, 2, Self::read_u16)
+    }
+
     /// Reads a PTP array of `u32`.
     fn read_u32_array(&mut self, field: &'static str) -> Result<Vec<u32>, ParseError> {
-        let count = self.read_u32(field)? as usize;
-
-        // Check the count against the buffer before the allocation. A damaged
-        // count of 0xffffffff must not make the host reserve 16 GiB.
-        let need = count.checked_mul(4).ok_or(ParseError::Truncated {
-            field,
-            need: usize::MAX,
-            got: self.remaining(),
-        })?;
-        if self.remaining() < need {
-            return Err(ParseError::Truncated {
-                field,
-                need,
-                got: self.remaining(),
-            });
-        }
-
-        let mut out = Vec::with_capacity(count);
-        for _ in 0..count {
-            out.push(self.read_u32(field)?);
-        }
-        Ok(out)
+        self.read_array(field, 4, Self::read_u32)
     }
 }
 
@@ -602,18 +590,12 @@ pub mod format {
     pub const ASSOCIATION: u16 = 0x3001;
     /// A file the device does not classify.
     pub const UNDEFINED: u16 = 0x3000;
-    /// A text file.
-    pub const TEXT: u16 = 0x3004;
-    /// An HTML file.
-    pub const HTML: u16 = 0x3005;
     /// A JPEG image.
+    ///
+    /// The project reads no format but `ASSOCIATION`, which separates a
+    /// folder from a file. This one stays because a test uses it as a format
+    /// that is not a folder.
     pub const EXIF_JPEG: u16 = 0x3801;
-    /// A PNG image.
-    pub const PNG: u16 = 0x380b;
-    /// An MP3 file.
-    pub const MP3: u16 = 0x3009;
-    /// An MP4 file.
-    pub const MP4: u16 = 0xb982;
 }
 
 /// Values for the third parameter of `GetObjectHandles`.
@@ -1048,6 +1030,39 @@ mod tests {
         assert_eq!(r.read_string("s").unwrap(), "");
     }
 
+    /// A name that the count byte cannot hold gets cut, and what remains must
+    /// still be valid UTF-16.
+    ///
+    /// An emoji is two UTF-16 code units. A cut at 254 units can fall between
+    /// the two halves, and a lone half is not a character. The cut steps back
+    /// in that case.
+    #[test]
+    fn a_cut_name_never_holds_half_of_a_character() {
+        // 127 emoji give 254 code units exactly, so unit 254 starts the 128th.
+        let name = "\u{1f600}".repeat(200);
+        let mut out = Vec::new();
+        push_string(&mut out, &name);
+
+        let count = out[0] as usize;
+        assert!(count <= 255);
+
+        let mut r = Reader::new(&out);
+        let got = r
+            .read_string("filename")
+            .expect("the cut name must still read as UTF-16");
+        assert!(got.chars().all(|c| c == '\u{1f600}'), "got {got:?}");
+        assert!(!got.is_empty());
+    }
+
+    #[test]
+    fn a_name_that_fits_is_not_cut() {
+        let name = "holiday.jpg";
+        let mut out = Vec::new();
+        push_string(&mut out, name);
+        let mut r = Reader::new(&out);
+        assert_eq!(r.read_string("filename").unwrap(), name);
+    }
+
     #[test]
     fn a_reader_never_moves_past_the_end() {
         let mut r = Reader::new(&[1, 2, 3]);
@@ -1120,8 +1135,6 @@ pub mod prop {
     pub const OBJECT_FILE_NAME: u16 = 0xdc07;
     /// The handle of the folder that holds the object.
     pub const PARENT_OBJECT: u16 = 0xdc0b;
-    /// Asks for every property. The value goes in parameter 3.
-    pub const ALL_PROPERTIES: u32 = 0xffff_ffff;
 }
 
 /// Data type codes of PTP.

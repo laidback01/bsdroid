@@ -6,11 +6,15 @@ on:
   pull_request:
 
 jobs:
-  # Only ptp-proto builds on Linux. usb-freebsd links libusb20, and mtpfs links
-  # the FUSE library of FreeBSD. Neither library is on a Linux runner, so an
-  # earlier version of this file failed on each push.
+  # usb-freebsd links libusb20 and mtpfs links the FUSE library of FreeBSD.
+  # Neither library is on a Linux runner, so neither program links there.
+  #
+  # Linking is the only step that needs them. `cargo check` and `cargo clippy`
+  # stop before the linker, so this job covers every crate and answers in
+  # seconds. An earlier version of this file checked ptp-proto alone, and a
+  # lint fault in the other four waited for the FreeBSD machine.
   portable:
-    name: the protocol crate, on Linux
+    name: check and lint every crate, on Linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,8 +22,19 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
-      - run: cargo clippy -p ptp-proto --all-targets -- -D warnings
-      - run: cargo test -p ptp-proto
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # These three crates need no library from FreeBSD, so they also run.
+      - run: cargo test -p ptp-proto -p mtp-session -p hex-fixture
+
+  # The manifest declares a lowest version of Rust. Nothing checked it, so a
+  # feature from a later version could reach the code and no job would notice.
+  msrv:
+    name: the lowest version of Rust the manifest allows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+      - run: cargo check --workspace --all-targets
 
   freebsd:
     name: the whole project, on FreeBSD

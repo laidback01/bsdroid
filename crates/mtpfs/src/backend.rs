@@ -299,6 +299,12 @@ struct ReadCache {
 
 impl ReadCache {
     /// Gives the bytes for a read, when the cache holds them.
+    ///
+    /// The answer can be shorter than `want`. A read that crosses the end of
+    /// the cache gets the part the cache holds, and the caller then asks the
+    /// device for the rest. A caller that treats a short answer as the whole
+    /// answer gives the kernel a short read, and the kernel takes a short read
+    /// as the end of the file. See the note in [`Mtp::read_at`].
     fn get(&self, handle: u32, offset: u64, want: usize) -> Option<&[u8]> {
         if self.handle != handle || offset < self.start {
             return None;
@@ -585,7 +591,14 @@ impl Mtp {
             let raw = self.operation("GetObjectInfo", op::GET_OBJECT_INFO, &[h])?;
             let info = match ObjectInfo::parse(&raw) {
                 Ok(i) => i,
-                Err(_) => continue,
+                Err(e) => {
+                    // An earlier version dropped the object with no word. The
+                    // file then vanished from the folder and nothing said why.
+                    if self.settings.debug {
+                        eprintln!("mtpfs: object {h} gives a dataset that does not parse: {e}");
+                    }
+                    continue;
+                }
             };
             let is_dir = info.is_folder();
             out.push(Entry {
@@ -795,7 +808,7 @@ impl Mtp {
     pub fn rename_object(&mut self, handle: u32, name: &str) -> Result<(), Error> {
         // The value of the property is a PTP string, with no dataset around it.
         let mut payload = Vec::new();
-        ptp_proto::push_ptp_string(&mut payload, name);
+        ptp_proto::push_string(&mut payload, name);
 
         self.sending_data(
             "SetObjectPropValue",
@@ -989,6 +1002,93 @@ impl Drop for Mtp {
                 eprintln!("mtpfs: the USB reset failed: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::ReadCache;
+
+    /// A cache that holds 100 bytes of object 7, from offset 1000.
+    fn cache() -> ReadCache {
+        ReadCache {
+            handle: 7,
+            start: 1000,
+            data: (0u8..100).collect(),
+        }
+    }
+
+    #[test]
+    fn a_read_inside_the_cache_gives_the_bytes() {
+        let c = cache();
+        assert_eq!(c.get(7, 1000, 10), Some(&(0u8..10).collect::<Vec<_>>()[..]));
+        assert_eq!(c.get(7, 1050, 5), Some(&(50u8..55).collect::<Vec<_>>()[..]));
+    }
+
+    #[test]
+    fn another_object_never_hits() {
+        assert_eq!(cache().get(8, 1000, 10), None);
+    }
+
+    #[test]
+    fn a_read_before_the_cache_never_hits() {
+        // The cache holds no bytes below `start`, and a read that begins
+        // earlier must go to the device.
+        assert_eq!(cache().get(7, 999, 10), None);
+        assert_eq!(cache().get(7, 0, 10), None);
+    }
+
+    #[test]
+    fn a_read_after_the_cache_never_hits() {
+        assert_eq!(cache().get(7, 1100, 10), None, "one byte past the end");
+        assert_eq!(cache().get(7, 5000, 10), None);
+    }
+
+    /// This is the case that broke a copy before the loop in `read_at`.
+    ///
+    /// A read that begins inside the cache and ends past it gets the part the
+    /// cache holds, and no more. An earlier version of `read_at` gave that
+    /// short answer to the caller, so the kernel saw a short read and took it
+    /// as the end of the file. A copy then gave wrong bytes after 4194304
+    /// bytes. `cp` reads on a boundary of 65536 bytes and never crossed the
+    /// end of the cache, so `cp` was right and `sha256` was not.
+    #[test]
+    fn a_read_that_crosses_the_end_gives_only_what_the_cache_holds() {
+        let c = cache();
+        let got = c
+            .get(7, 1090, 50)
+            .expect("the read begins inside the cache");
+        assert_eq!(got.len(), 10, "the cache holds 10 bytes from 1090");
+        assert_eq!(got, &(90u8..100).collect::<Vec<_>>()[..]);
+    }
+
+    #[test]
+    fn the_last_byte_of_the_cache_still_hits() {
+        let c = cache();
+        assert_eq!(c.get(7, 1099, 1), Some(&[99u8][..]));
+        assert_eq!(c.get(7, 1099, 100), Some(&[99u8][..]), "and asks no more");
+    }
+
+    #[test]
+    fn a_read_of_no_bytes_gives_no_bytes() {
+        let c = cache();
+        assert_eq!(c.get(7, 1000, 0), Some(&[][..]));
+    }
+
+    /// An empty cache must never report a hit, or `read_at` would loop.
+    ///
+    /// The loop in `read_at` continues while the answer is shorter than the
+    /// count the caller asked for. A hit of zero bytes at the same offset
+    /// would add nothing and go round again.
+    #[test]
+    fn an_empty_cache_never_hits() {
+        let c = ReadCache {
+            handle: 7,
+            start: 1000,
+            data: Vec::new(),
+        };
+        assert_eq!(c.get(7, 1000, 10), None);
+        assert_eq!(c.get(7, 1001, 10), None);
     }
 }
 

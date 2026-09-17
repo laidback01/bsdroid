@@ -195,16 +195,19 @@ impl LinkSpeed {
             Self::Variable => "variable",
             Self::Super => "super, USB 3.0",
             Self::SuperPlus => "super plus, USB 3.1",
-            Self::Other(_) => "not named here",
+            Self::Other(_) => "a speed this code does not name",
         }
     }
 }
 
 impl fmt::Display for LinkSpeed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.bits_per_second() {
-            Some(b) => write!(f, "{} ({} Mbit each second)", self.name(), b / 1_000_000),
-            None => f.write_str(self.name()),
+        match (self, self.bits_per_second()) {
+            (_, Some(b)) => write!(f, "{} ({} Mbit each second)", self.name(), b / 1_000_000),
+            // Keep the value, as `TransferStatus` does. A speed the code
+            // cannot name is worth reporting with its number.
+            (Self::Other(v), None) => write!(f, "{} ({v})", self.name()),
+            (_, None) => f.write_str(self.name()),
         }
     }
 }
@@ -230,6 +233,8 @@ pub enum UsbError {
     },
     /// The host sent fewer bytes than the caller asked for.
     ShortWrite { want: usize, got: usize },
+    /// The kernel will not release an interface.
+    Detach { interface: u8, code: i32 },
     /// The host cannot reset the device.
     ///
     /// A reset needs root on FreeBSD. The kernel checks the privilege, and the
@@ -269,6 +274,10 @@ impl fmt::Display for UsbError {
                     "the host sent {got} bytes, and the caller asked for {want}"
                 )
             }
+            Self::Detach { interface, code } => write!(
+                f,
+                "the kernel will not release interface {interface}, code {code}"
+            ),
             Self::Reset(c) => write!(
                 f,
                 "cannot reset the device, code {c}. A reset needs root on FreeBSD"
@@ -306,6 +315,8 @@ pub struct Backend {
 
 impl Backend {
     /// Opens the default backend for the platform.
+    ///
+    /// The function can fail, so the type has no `Default`.
     pub fn new() -> Result<Self, UsbError> {
         // SAFETY: the call takes no argument and gives a pointer or null.
         let be = unsafe { sys::libusb20_be_alloc_default() };
@@ -597,7 +608,13 @@ impl OpenDevice {
         // SAFETY: `self.dev` is open.
         let rc = unsafe { sys::libusb20_dev_detach_kernel_driver(self.dev, interface) };
         if rc != 0 {
-            return Err(UsbError::Open(rc));
+            // An earlier version gave `Open` here, whose message tells the
+            // user to check the `operator` group. That advice does not apply
+            // to a detach, which fails for other reasons.
+            return Err(UsbError::Detach {
+                interface,
+                code: rc,
+            });
         }
         Ok(())
     }

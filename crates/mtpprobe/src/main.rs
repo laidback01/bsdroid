@@ -824,17 +824,17 @@ fn display_name(name: &str) -> String {
 
 /// Shortens a name for a report, so a report holds no long private name.
 fn short_name(name: &str) -> String {
-    if name.len() <= 24 {
+    const KEEP: usize = 12;
+    const LIMIT: usize = 24;
+
+    // Count characters, and not bytes. A name of accented letters holds more
+    // bytes than characters, and the limit is about what a reader sees.
+    let count = name.chars().count();
+    if count <= LIMIT {
         return name.to_string();
     }
-    let tail: String = name
-        .chars()
-        .rev()
-        .take(12)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
+
+    let tail: String = name.chars().skip(count - KEEP).collect();
     format!("...{tail}")
 }
 
@@ -1131,6 +1131,15 @@ fn get(node: Option<Node>, handle: Option<u32>) -> Result<(), String> {
     Ok(())
 }
 
+/// The count of times the host checks whether the device left the bus.
+const LEAVE_ATTEMPTS: u32 = 40;
+/// The wait between two checks for the device to leave.
+const LEAVE_WAIT: Duration = Duration::from_millis(100);
+/// The count of times the host checks whether the device came back.
+const RETURN_ATTEMPTS: u32 = 60;
+/// The wait between two checks for the device to return.
+const RETURN_WAIT: Duration = Duration::from_millis(250);
+
 /// The count of attempts the host makes to read the storage list.
 const STORAGE_ATTEMPTS: u32 = 10;
 /// The wait between two attempts to read the storage list.
@@ -1241,33 +1250,33 @@ fn coldstart(node: Option<Node>) -> Result<(), String> {
     let started = Instant::now();
 
     // Step 1: wait for the device to leave.
-    let mut left = None;
-    for attempt in 1..=40 {
+    let mut left = false;
+    for _ in 0..LEAVE_ATTEMPTS {
         let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
         if discover::any(&backend, TIMEOUT) {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(LEAVE_WAIT);
         } else {
-            left = Some(attempt);
+            left = true;
             break;
         }
     }
     match left {
-        Some(_) => println!(
+        true => println!(
             "  the device left the bus after {} ms",
             started.elapsed().as_millis()
         ),
-        None => println!("  the device did not leave the bus. The reset did nothing."),
+        false => println!("  the device did not leave the bus. The reset did nothing."),
     }
 
     // Step 2: wait for the device to return.
     let mut came_back = None;
-    for _ in 1..=60 {
+    for _ in 0..RETURN_ATTEMPTS {
         let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
         if discover::any(&backend, TIMEOUT) {
             came_back = Some(started.elapsed());
             break;
         }
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(RETURN_WAIT);
     }
 
     match came_back {

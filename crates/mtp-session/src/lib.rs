@@ -344,6 +344,76 @@ impl std::error::Error for SessionError {
     }
 }
 
+/// What a session needs from the thing underneath it.
+///
+/// The trait exists so a test can drive the state machine with recorded bytes
+/// and no device. The read and write paths of MTP are where this project has
+/// found most of its faults, and every one of them was found on hardware
+/// because no test could reach the code.
+///
+/// [`MtpDevice`] is the real implementation. The cost of the dynamic call is
+/// nothing next to a USB transfer.
+pub trait Transport {
+    /// Sends bytes to the device, and stops at the timeout.
+    fn write(&mut self, data: &[u8], timeout: Duration) -> Result<usize, UsbError>;
+
+    /// Reads bytes from the device, and stops at the timeout.
+    ///
+    /// The device may send fewer bytes than the buffer holds.
+    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, UsbError>;
+
+    /// Clears a halt condition on both endpoints.
+    fn clear_stalls(&mut self);
+
+    /// The speed of the link, when the transport knows it.
+    fn speed(&self) -> usb_freebsd::device::LinkSpeed {
+        usb_freebsd::device::LinkSpeed::Unknown
+    }
+
+    /// What the device says it can do.
+    fn capabilities(
+        &mut self,
+        _timeout: Duration,
+    ) -> Result<usb_freebsd::descriptor::DeviceCapabilities, UsbError> {
+        Err(UsbError::NoBackend)
+    }
+
+    /// Resets the device on the USB port.
+    fn reset(&mut self) -> Result<(), UsbError> {
+        Ok(())
+    }
+}
+
+impl Transport for MtpDevice {
+    fn write(&mut self, data: &[u8], timeout: Duration) -> Result<usize, UsbError> {
+        self.channels().write.write(data, timeout)
+    }
+
+    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, UsbError> {
+        self.channels().read.read(buf, timeout)
+    }
+
+    fn clear_stalls(&mut self) {
+        self.channels().write.clear_stall();
+        self.channels().read.clear_stall();
+    }
+
+    fn speed(&self) -> usb_freebsd::device::LinkSpeed {
+        MtpDevice::speed(self)
+    }
+
+    fn capabilities(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<usb_freebsd::descriptor::DeviceCapabilities, UsbError> {
+        MtpDevice::capabilities(self, timeout)
+    }
+
+    fn reset(&mut self) -> Result<(), UsbError> {
+        MtpDevice::reset(self)
+    }
+}
+
 /// Says whether a data phase needs a packet of zero bytes at the end.
 ///
 /// A device counts packets. A last packet that is full tells the device that
@@ -359,7 +429,7 @@ pub fn needs_zero_packet(total: u64, packet: u64) -> bool {
 /// borrowed two channels from a device the caller held, and a caller that
 /// wanted both in one struct had to launder the lifetimes with `unsafe`.
 pub struct Session {
-    device: MtpDevice,
+    device: Box<dyn Transport>,
     transaction: u32,
     config: Config,
     /// True while the host holds a session that it opened.
@@ -379,9 +449,9 @@ impl Session {
     /// The function puts the endpoints in a known state first, and gives the
     /// count of bytes it dropped. A program that stopped in the middle of a
     /// transfer leaves the device with bytes to send.
-    pub fn new(device: MtpDevice, config: Config) -> (Self, u64) {
+    pub fn new(device: impl Transport + 'static, config: Config) -> (Self, u64) {
         let mut s = Self {
-            device,
+            device: Box::new(device),
             transaction: 0,
             config: config.normalised(),
             session_open: false,
@@ -394,9 +464,9 @@ impl Session {
     ///
     /// The step costs [`DRAIN_FIRST_MILLIS`] on a device that works. A caller
     /// that measures the cost of a session start needs this function.
-    pub fn new_without_recovery(device: MtpDevice, config: Config) -> Self {
+    pub fn new_without_recovery(device: impl Transport + 'static, config: Config) -> Self {
         Self {
-            device,
+            device: Box::new(device),
             transaction: 0,
             config: config.normalised(),
             session_open: false,
@@ -712,8 +782,6 @@ impl Session {
     fn write_all(&mut self, step: &'static str, bytes: &[u8]) -> Result<(), SessionError> {
         let timeout = self.config.timeout;
         self.device
-            .channels()
-            .write
             .write(bytes, timeout)
             .map(|_| ())
             .map_err(|source| SessionError::Usb { step, source })
@@ -722,8 +790,6 @@ impl Session {
     fn read_once(&mut self, step: &'static str, buf: &mut [u8]) -> Result<usize, SessionError> {
         let timeout = self.config.timeout;
         self.device
-            .channels()
-            .read
             .read(buf, timeout)
             .map_err(|source| SessionError::Usb { step, source })
     }
@@ -739,8 +805,7 @@ impl Session {
     /// reads and drops the bytes the device still holds. A new session starts
     /// with this function, so a user does not need to pull the cable.
     pub fn recover(&mut self) -> u64 {
-        self.device.channels().write.clear_stall();
-        self.device.channels().read.clear_stall();
+        self.device.clear_stalls();
         self.drain()
     }
 
@@ -766,7 +831,7 @@ impl Session {
         let rest = Duration::from_millis(DRAIN_REST_MILLIS);
 
         for _ in 0..MAX_READ_ROUNDS {
-            match self.device.channels().read.read(&mut buf, deadline) {
+            match self.device.read(&mut buf, deadline) {
                 Ok(0) => break,
                 Ok(n) => {
                     dropped += n as u64;
@@ -895,6 +960,455 @@ fn read_exact_or_short<R: Read>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod fake {
+    //! A transport that answers from a script, so a test needs no device.
+
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// What the fake device does for one read.
+    pub enum Answer {
+        /// Give these bytes, in one transfer.
+        Bytes(Vec<u8>),
+        /// Give nothing, as an endpoint with nothing on it does.
+        Empty,
+        /// Fail with this status.
+        Fail(UsbError),
+    }
+
+    /// A device that reads from a script and records what the host wrote.
+    pub struct FakeDevice {
+        answers: Vec<Answer>,
+        at: usize,
+        /// Every buffer the host sent, in order.
+        pub writes: Rc<RefCell<Vec<Vec<u8>>>>,
+        pub stalls_cleared: usize,
+    }
+
+    impl FakeDevice {
+        pub fn new(answers: Vec<Answer>) -> (Self, Rc<RefCell<Vec<Vec<u8>>>>) {
+            let writes = Rc::new(RefCell::new(Vec::new()));
+            (
+                Self {
+                    answers,
+                    at: 0,
+                    writes: Rc::clone(&writes),
+                    stalls_cleared: 0,
+                },
+                writes,
+            )
+        }
+    }
+
+    impl Transport for FakeDevice {
+        fn write(&mut self, data: &[u8], _timeout: Duration) -> Result<usize, UsbError> {
+            self.writes.borrow_mut().push(data.to_vec());
+            Ok(data.len())
+        }
+
+        fn read(&mut self, buf: &mut [u8], _timeout: Duration) -> Result<usize, UsbError> {
+            // A script that runs out behaves like an endpoint with nothing on
+            // it, so a test that reads too often stops instead of looping.
+            let Some(answer) = self.answers.get(self.at) else {
+                return Ok(0);
+            };
+            self.at += 1;
+            match answer {
+                Answer::Empty => Ok(0),
+                Answer::Fail(e) => Err(e.clone()),
+                Answer::Bytes(b) => {
+                    let n = b.len().min(buf.len());
+                    buf[..n].copy_from_slice(&b[..n]);
+                    Ok(n)
+                }
+            }
+        }
+
+        fn clear_stalls(&mut self) {
+            self.stalls_cleared += 1;
+        }
+    }
+
+    /// Builds a response container.
+    pub fn response(code: u16, tid: u32, params: &[u32]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        for p in params {
+            payload.extend_from_slice(&p.to_le_bytes());
+        }
+        ptp_proto::build(ContainerType::Response, code, tid, &payload).unwrap()
+    }
+
+    /// Builds a complete data container.
+    pub fn data(code: u16, tid: u32, payload: &[u8]) -> Vec<u8> {
+        ptp_proto::build(ContainerType::Data, code, tid, payload).unwrap()
+    }
+
+    /// A configuration with no recovery cost and a small read buffer.
+    pub fn config() -> Config {
+        Config {
+            timeout: Duration::from_millis(1),
+            read_buffer: READ_BUFFER_MIN,
+            write_chunk: 1024,
+            packet: 512,
+        }
+    }
+}
+
+#[cfg(test)]
+mod state_machine_tests {
+    use super::fake::*;
+    use super::*;
+
+    fn session(answers: Vec<Answer>) -> Session {
+        let (dev, _) = FakeDevice::new(answers);
+        Session::new_without_recovery(dev, config())
+    }
+
+    #[test]
+    fn a_response_with_no_data_phase_gives_the_code() {
+        let mut s = session(vec![Answer::Bytes(response(resp::OK, 0, &[]))]);
+        let out = s.operation("CloseSession", op::CLOSE_SESSION, &[]).unwrap();
+        assert!(out.is_ok());
+        assert!(out.data.is_empty());
+        assert_eq!(out.reads, 1);
+    }
+
+    /// `SendObjectInfo` answers with the handle of the new object in the
+    /// parameters of the response container, and not in a data phase.
+    ///
+    /// An earlier version of the filesystem read the handle from the data
+    /// phase. Every write would have failed.
+    #[test]
+    fn the_handle_of_a_new_object_comes_from_the_response_parameters() {
+        let mut s = session(vec![Answer::Bytes(response(
+            resp::OK,
+            0,
+            &[0x0001_0001, 0xffff_ffff, 42],
+        ))]);
+        let mut payload: &[u8] = b"dataset";
+        let out = s
+            .operation_sending(
+                "SendObjectInfo",
+                op::SEND_OBJECT_INFO,
+                &[1, 0],
+                &mut payload,
+                7,
+            )
+            .unwrap();
+        assert_eq!(out.response_params, vec![0x0001_0001, 0xffff_ffff, 42]);
+        assert_eq!(out.response_params.get(2).copied(), Some(42));
+    }
+
+    #[test]
+    fn a_data_phase_that_fits_one_transfer_reads_in_one_go() {
+        let payload = vec![7u8; 100];
+        let mut s = session(vec![
+            Answer::Bytes(data(op::GET_OBJECT, 0, &payload)),
+            Answer::Bytes(response(resp::OK, 0, &[])),
+        ]);
+        let out = s.operation("GetObject", op::GET_OBJECT, &[1]).unwrap();
+        assert!(out.is_ok());
+        assert_eq!(out.data, payload);
+    }
+
+    /// The host must join many transfers into one payload.
+    ///
+    /// The read buffer is 512 bytes here, and the payload is 1500, so the
+    /// device answers in four transfers.
+    #[test]
+    fn many_transfers_join_into_one_payload() {
+        let payload: Vec<u8> = (0..1500u32).map(|i| i as u8).collect();
+        let whole = data(op::GET_OBJECT, 0, &payload);
+
+        let mut answers: Vec<Answer> = whole
+            .chunks(READ_BUFFER_MIN)
+            .map(|c| Answer::Bytes(c.to_vec()))
+            .collect();
+        answers.push(Answer::Bytes(response(resp::OK, 0, &[])));
+
+        let mut s = session(answers);
+        let out = s.operation("GetObject", op::GET_OBJECT, &[1]).unwrap();
+        assert_eq!(out.data, payload, "the parts join in order");
+        // 1500 payload bytes plus a 12 byte header is 1512, which is three
+        // reads of 512. The response read is not one of these.
+        assert_eq!(out.reads, 3, "the host joined three transfers");
+    }
+
+    /// This is the fault that the filesystem had and the probe did not.
+    ///
+    /// The device declares a payload and then stops early. The host must
+    /// report the fault, and not give a short buffer that reads as complete.
+    #[test]
+    fn a_data_phase_that_stops_early_is_a_fault() {
+        let payload = vec![7u8; 2000];
+        let whole = data(op::GET_DEVICE_INFO, 0, &payload);
+
+        // The device sends the first transfer and then nothing.
+        let mut s = session(vec![
+            Answer::Bytes(whole[..READ_BUFFER_MIN].to_vec()),
+            Answer::Empty,
+        ]);
+
+        let got = s.operation("GetDeviceInfo", op::GET_DEVICE_INFO, &[]);
+        match got {
+            Err(SessionError::Incomplete { step, want, got }) => {
+                assert_eq!(step, "GetDeviceInfo");
+                assert_eq!(want, whole.len() as u64);
+                assert!(got < want, "the host had {got} of {want}");
+            }
+            other => panic!("expected Incomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_container_of_the_wrong_kind_is_a_fault() {
+        // An event container where a response was due.
+        let ev = ptp_proto::build(ContainerType::Event, 0x4002, 0, &[]).unwrap();
+        let mut s = session(vec![Answer::Bytes(ev)]);
+        match s.operation("GetStorageIDs", op::GET_STORAGE_IDS, &[]) {
+            Err(SessionError::Unexpected { got, .. }) => assert_eq!(got, ContainerType::Event),
+            other => panic!("expected Unexpected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_transfer_that_fails_names_the_step() {
+        let mut s = session(vec![Answer::Fail(UsbError::Transfer {
+            endpoint: 0x81,
+            status: usb_freebsd::device::TransferStatus::TimedOut,
+        })]);
+        match s.operation("GetDeviceInfo", op::GET_DEVICE_INFO, &[]) {
+            Err(e) => {
+                assert_eq!(e.step(), "GetDeviceInfo");
+                assert!(e.to_string().contains("timed out"), "{e}");
+            }
+            Ok(o) => panic!("expected a fault, got {o:?}"),
+        }
+    }
+
+    /// A data phase that ends on a packet boundary needs a packet of zero
+    /// bytes, or the device waits for more and the transfer stops.
+    #[test]
+    fn a_send_on_a_packet_boundary_ends_with_an_empty_write() {
+        // 500 payload bytes plus the 12 byte header gives 512, one packet.
+        let (dev, writes) = FakeDevice::new(vec![Answer::Bytes(response(resp::OK, 0, &[]))]);
+        let mut s = Session::new_without_recovery(dev, config());
+
+        let payload = vec![0u8; 500];
+        let mut cursor: &[u8] = &payload;
+        s.operation_sending("SendObject", op::SEND_OBJECT, &[], &mut cursor, 500)
+            .unwrap();
+
+        let w = writes.borrow();
+        assert_eq!(w.last().map(Vec::len), Some(0), "the last write is empty");
+        let sent: usize = w.iter().skip(1).map(Vec::len).sum();
+        assert_eq!(sent, 512, "the command, then 512 bytes, then nothing");
+    }
+
+    #[test]
+    fn a_send_off_a_packet_boundary_ends_with_no_empty_write() {
+        let (dev, writes) = FakeDevice::new(vec![Answer::Bytes(response(resp::OK, 0, &[]))]);
+        let mut s = Session::new_without_recovery(dev, config());
+
+        let payload = vec![0u8; 501];
+        let mut cursor: &[u8] = &payload;
+        s.operation_sending("SendObject", op::SEND_OBJECT, &[], &mut cursor, 501)
+            .unwrap();
+
+        let w = writes.borrow();
+        assert_ne!(w.last().map(Vec::len), Some(0), "no packet of zero bytes");
+    }
+
+    /// The first write carries the header and as much payload as fits, and it
+    /// must end on a packet boundary so the device reads no short packet in
+    /// the middle of the data phase.
+    #[test]
+    fn every_write_but_the_last_is_a_whole_number_of_packets() {
+        let (dev, writes) = FakeDevice::new(vec![Answer::Bytes(response(resp::OK, 0, &[]))]);
+        let mut s = Session::new_without_recovery(dev, config());
+
+        let payload = vec![0u8; 5000];
+        let mut cursor: &[u8] = &payload;
+        s.operation_sending("SendObject", op::SEND_OBJECT, &[], &mut cursor, 5000)
+            .unwrap();
+
+        let w = writes.borrow();
+        // Skip the command container, and check every write but the last.
+        for (n, buf) in w.iter().skip(1).enumerate().take(w.len() - 2) {
+            assert_eq!(buf.len() % 512, 0, "write {n} holds {} bytes", buf.len());
+        }
+    }
+
+    #[test]
+    fn the_payload_the_host_sends_is_the_payload_the_caller_gave() {
+        let (dev, writes) = FakeDevice::new(vec![Answer::Bytes(response(resp::OK, 0, &[]))]);
+        let mut s = Session::new_without_recovery(dev, config());
+
+        let payload: Vec<u8> = (0..3000u32).map(|i| i as u8).collect();
+        let mut cursor: &[u8] = &payload;
+        s.operation_sending("SendObject", op::SEND_OBJECT, &[], &mut cursor, 3000)
+            .unwrap();
+
+        let w = writes.borrow();
+        let mut sent = Vec::new();
+        for (n, buf) in w.iter().skip(1).enumerate() {
+            // The first data write carries the 12 byte container header.
+            sent.extend_from_slice(if n == 0 {
+                &buf[ptp_proto::HEADER_LEN..]
+            } else {
+                buf
+            });
+        }
+        assert_eq!(sent, payload);
+    }
+
+    /// A reader that gives fewer bytes than promised leaves the device
+    /// waiting, so the host must report the fault.
+    #[test]
+    fn a_reader_that_runs_short_is_a_fault() {
+        let mut s = session(vec![Answer::Bytes(response(resp::OK, 0, &[]))]);
+        let mut cursor: &[u8] = b"only ten b";
+        match s.operation_sending("SendObject", op::SEND_OBJECT, &[], &mut cursor, 5000) {
+            // The count names the chunk the host was filling, and not the
+            // whole file. The reader gave 10 bytes of it.
+            Err(SessionError::ShortRead { want, got, .. }) => {
+                assert_eq!(got, 10);
+                assert!(got < want, "the reader gave {got} of {want}");
+            }
+            other => panic!("expected ShortRead, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_payload_too_large_for_the_length_field_never_reaches_the_wire() {
+        let (dev, writes) = FakeDevice::new(vec![]);
+        let mut s = Session::new_without_recovery(dev, config());
+
+        let mut cursor: &[u8] = b"";
+        let got = s.operation_sending(
+            "SendObject",
+            op::SEND_OBJECT,
+            &[],
+            &mut cursor,
+            u32::MAX as u64,
+        );
+        assert!(matches!(got, Err(SessionError::Build { .. })), "{got:?}");
+        assert!(writes.borrow().is_empty(), "the host sent nothing");
+    }
+
+    #[test]
+    fn the_transaction_id_grows_with_each_operation() {
+        let (dev, writes) = FakeDevice::new(vec![
+            Answer::Bytes(response(resp::OK, 0, &[])),
+            Answer::Bytes(response(resp::OK, 1, &[])),
+        ]);
+        let mut s = Session::new_without_recovery(dev, config());
+        s.operation("OpenSession", op::OPEN_SESSION, &[1]).unwrap();
+        s.operation("CloseSession", op::CLOSE_SESSION, &[]).unwrap();
+
+        let w = writes.borrow();
+        let first = Container::parse(&w[0]).unwrap();
+        let second = Container::parse(&w[1]).unwrap();
+        assert_eq!(first.transaction_id, 0);
+        assert_eq!(second.transaction_id, 1);
+    }
+
+    /// A session that meets an open session closes it and opens a new one.
+    #[test]
+    fn an_open_session_is_closed_and_opened_again() {
+        let mut s = session(vec![
+            Answer::Bytes(response(resp::SESSION_ALREADY_OPEN, 0, &[])),
+            Answer::Bytes(response(resp::OK, 1, &[])), // the close
+            Answer::Empty,                             // the drain
+            Answer::Bytes(response(resp::OK, 2, &[])), // the second open
+        ]);
+
+        let open = s.open_session_or_repair(1).unwrap();
+        assert!(open.repaired);
+        assert_eq!(open.close_response, Some(resp::OK));
+        assert!(!open.wedged);
+        assert!(open.outcome.is_ok());
+    }
+
+    /// A device whose MTP service holds a session reports it twice.
+    #[test]
+    fn a_device_that_never_releases_the_session_is_reported_as_wedged() {
+        let mut s = session(vec![
+            Answer::Bytes(response(resp::SESSION_ALREADY_OPEN, 0, &[])),
+            Answer::Bytes(response(resp::OK, 1, &[])),
+            Answer::Empty,
+            Answer::Bytes(response(resp::SESSION_ALREADY_OPEN, 2, &[])),
+        ]);
+
+        let open = s.open_session_or_repair(1).unwrap();
+        assert!(open.repaired);
+        assert!(open.wedged, "the device still reports an open session");
+    }
+
+    #[test]
+    fn a_first_open_that_works_needs_no_repair() {
+        let mut s = session(vec![Answer::Bytes(response(resp::OK, 0, &[]))]);
+        let open = s.open_session_or_repair(1).unwrap();
+        assert!(!open.repaired);
+        assert!(!open.wedged);
+        assert_eq!(open.dropped, 0);
+    }
+
+    /// The drain stops at the first empty read, and reports what it dropped.
+    #[test]
+    fn the_drain_reports_the_bytes_it_dropped() {
+        let (dev, _) = FakeDevice::new(vec![
+            Answer::Bytes(vec![0u8; 100]),
+            Answer::Bytes(vec![0u8; 40]),
+            Answer::Empty,
+        ]);
+        let mut s = Session::new_without_recovery(dev, config());
+        assert_eq!(s.drain(), 140);
+    }
+
+    #[test]
+    fn a_drain_of_an_empty_endpoint_drops_nothing() {
+        let (dev, _) = FakeDevice::new(vec![Answer::Empty]);
+        let mut s = Session::new_without_recovery(dev, config());
+        assert_eq!(s.drain(), 0);
+    }
+
+    /// A drain stops at a fault, because a device that fails is not going to
+    /// answer the next read either.
+    #[test]
+    fn a_drain_stops_at_a_fault() {
+        let (dev, _) = FakeDevice::new(vec![
+            Answer::Bytes(vec![0u8; 8]),
+            Answer::Fail(UsbError::Control(-1)),
+        ]);
+        let mut s = Session::new_without_recovery(dev, config());
+        assert_eq!(s.drain(), 8);
+    }
+
+    /// `Session::new` clears the endpoints before anything else.
+    #[test]
+    fn a_new_session_clears_the_endpoints_first() {
+        let (dev, _) = FakeDevice::new(vec![Answer::Bytes(vec![0u8; 20]), Answer::Empty]);
+        let (_s, dropped) = Session::new(dev, config());
+        assert_eq!(dropped, 20, "the host dropped what an earlier program left");
+    }
+
+    #[test]
+    fn a_declared_size_above_the_limit_is_a_fault() {
+        // A header that declares more than MAX_DATA_BYTES.
+        let mut header = ptp_proto::build_data_header(op::GET_OBJECT, 0, 0).unwrap();
+        header[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut s = session(vec![Answer::Bytes(header)]);
+
+        // u32::MAX is below MAX_DATA_BYTES, so this one completes the check
+        // and fails later. The guard matters for the type, not this value.
+        let got = s.operation("GetObject", op::GET_OBJECT, &[1]);
+        assert!(got.is_err(), "a payload that never arrives is a fault");
+    }
 }
 
 #[cfg(test)]
