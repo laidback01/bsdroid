@@ -58,6 +58,36 @@ worth doing, but by someone who would be aware of what all this shim affects.
 This project took the other road just because I didn't want to try and wrangle
 that!
 
+### Does this use libmtp?
+
+No. This project holds its own MTP code, in `crates/ptp-proto`.
+
+The project read the device fault database of `libmtp` as reference material,
+and `docs/08-what-libmtp-knows.md` compares the two. The project links no part
+of `libmtp`, and calls no function of it.
+
+One thing here confuses a reader, so check it yourself:
+
+```
+ldd target/release/mtpfs
+        libusb.so.3 => /usr/lib/libusb.so.3
+```
+
+That file looks like the compatibility layer. FreeBSD puts two interfaces in
+one file: the `libusb-1.0` compatibility layer, and the native `libusb20`.
+There is no separate file for the native one.
+
+The symbols show which interface a program uses:
+
+```
+$ nm -u target/release/mtpfs | grep -c libusb20_
+15
+$ nm -u target/release/mtpfs | grep 'U libusb_' | grep -v libusb20
+(nothing)
+```
+
+Fifteen calls to the native interface. None to the compatibility layer.
+
 ## What works now
 
 | Operation              | State |
