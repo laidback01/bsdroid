@@ -507,9 +507,12 @@ The rule in `bsdroid.conf` matches the vendor, not the product, because an
 Android phone reports a different product ID in every USB mode. Change the
 vendor for a phone that is not a Samsung; `mtpfs -l` prints it.
 
-`docs/11-automount.md` explains the parts that are less obvious: why a phone
-fires two attach events, why the helper needs a lock, and why testing whether
-a mount is alive has to be done as the mount's owner.
+**[PLUG-AND-PLAY.md](PLUG-AND-PLAY.md) is the one page to read for this** —
+install, test, and every gotcha worth knowing (File Transfer mode, bad cables,
+the disk cost of an in-place edit, what MTP does not store).
+`docs/11-automount.md` covers the less obvious mechanics: why a phone fires two
+attach events, why the helper needs a lock, and why testing whether a mount is
+alive has to be done as the mount's owner.
 
 Run `mtpfs -l` for the vendor and the product of a cellphone.
 

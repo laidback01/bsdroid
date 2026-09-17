@@ -161,13 +161,25 @@ attach)
 
     label=$(label_of "$name")
     [ -n "$label" ] || label="mtp-${vendor#0x}"
-    mount_point="$MOUNT_ROOT/$label"
 
-    if mounted_at "$mount_point"; then
-        say "$mount_point already holds a mount"
-        printf '%s\n' "$mount_point" > "$state"
-        exit 0
-    fi
+    # --- Find a folder that no mount holds ---
+    #
+    # The name comes from the model, so two cellphones of one model want one
+    # folder. The second cellphone must not take the folder of the first one.
+    #
+    # An earlier version wrote the folder of the first cellphone into the
+    # state file of the second one. A detach of the second cellphone then
+    # unmounted the first one.
+    mount_point="$MOUNT_ROOT/$label"
+    n=2
+    while mounted_at "$mount_point"; do
+        if [ "$n" -gt 9 ]; then
+            err "$MOUNT_ROOT holds a mount for $label and for eight more"
+            exit 75
+        fi
+        mount_point="$MOUNT_ROOT/$label-$n"
+        n=$((n + 1))
+    done
 
     # The account must own the mount point, because `vfs.usermount` gives a
     # mount to the owner of the folder alone.
