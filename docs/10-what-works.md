@@ -60,6 +60,11 @@ then held the same cellphone. A name gives the device a caller wants.
 | Remove a folder            | `rmdir`        | yes   |
 | Give a file a new name     | `mv`           | yes   |
 | Move a file to a folder    | `mv`           | yes   |
+| Write onto a file          | `cp`           | yes   |
+| Make a file shorter        | `truncate`     | yes   |
+| Add to the end of a file   | `>>`           | yes   |
+| Change a file in place     | `sed -i`       | yes   |
+| Move a file onto a file    | `mv`           | yes   |
 | Report the free space      | `df`           | yes   |
 | Search a tree              | `find`         | yes   |
 
@@ -70,17 +75,85 @@ for a file of 290 KB, and for a file of 450 MB.
 
 ### A change to a file that is on the device
 
-A program that opens a file on the device and writes to the file gets a fault.
+This works. The text below says how, because the way the host does the change
+decides what a fault leaves behind.
 
-MTP holds two operations for this, and both test devices support them. The
-project does not use them yet. A new file works, and a change to an old file
-does not.
+MTP has no operation that writes into the middle of an object, and no operation
+that renames one object onto the name of another. A change to a file therefore
+becomes a new object.
 
-The safe way today needs three steps:
+The host follows the shape of copy on write:
 
-1. Copy the file to the disk of the host.
-2. Change the file on the host.
-3. Copy the file back to the device, with a new name.
+1. The host reads the file into a spool file on its own disk.
+2. The program changes the spool file.
+3. The old object on the cellphone moves to a name that ends with
+   `.bsdroid-old-<number>`.
+4. The host sends the spool file under the real name.
+5. The host removes the old object.
+
+A read of the whole file is the cost of a change to one byte. A change to one
+byte of a file of 4 GB reads 4 GB and writes 4 GB.
+
+ZFS makes step 4 and step 5 one atomic step. MTP gives no atomic step, so the
+guarantee here is smaller:
+
+- The host never removes the old contents before the new contents hold the real
+  name.
+- A mount that stops between step 4 and step 5 leaves two objects. The first is
+  the new object under the real name. The second is the old object, under the
+  `.bsdroid-old-<number>` name. A person sees both objects, and loses nothing.
+
+A send that fails puts the old name back, so the folder looks as it did.
+
+### The space a change needs
+
+A change to a file needs space in two places:
+
+| Place              | How much it needs               |
+| ------------------ | ------------------------------- |
+| The disk of the host | The size of the whole file    |
+| The cellphone      | The size of the whole file, one more time |
+
+The host checks both places before it starts. If the space is not there, the
+host refuses with ENOSPC. The refusal comes before the read, and not after some
+gigabytes.
+
+`BSDROID_SPOOL` says which folder holds the spool file. The order is
+`BSDROID_SPOOL`, then `TMPDIR`, then `/var/tmp`. A `/tmp` folder that lives in
+memory is a poor choice for a file of some gigabytes.
+
+The cellphone needs room for two copies, because the old copy stays until the
+new copy is in place. A cellphone with 6 GB free cannot hold two copies of a
+file of 4.2 GB. The host then takes the second way:
+
+1. The host removes the old object first.
+2. The host sends the spool file under the real name.
+
+The spool file on the host is the only copy between step 1 and step 2. A send
+that fails in that window keeps the spool file, and the log gives the name of
+the spool file. Copy the file from there.
+
+The log says which way the host took, so a person can see the difference:
+
+```
+mtpfs: /DCIM/movie.mkv needs 4200 MB, and the cellphone has 1800 MB free.
+       The old copy goes first.
+```
+
+A file that fits in neither way gets ENOSPC, and the host changes nothing.
+
+### A spool file that took only part of a file
+
+A disk that fills in the middle of a write leaves a spool file with the wrong
+contents. The host does not send that spool file.
+
+An earlier version sent the part. A disk of 1.6 MB and a file of 5 MB left an
+object of 1.6 MB on the cellphone, under the right name. `cp` reported
+`Input/output error`. A part of a file under the right name is worse than no
+file, because a person cannot see the difference.
+
+The host now reports the number the disk gave. `cp` says
+`No space left on device`, and the folder on the cellphone holds no new object.
 
 ### A time, a mode and an owner
 
