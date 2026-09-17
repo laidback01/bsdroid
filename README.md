@@ -222,6 +222,68 @@ cargo test
 The tests need no cellphone. The test data comes from real captures, and
 `crates/ptp-proto/tests/fixtures/README.md` records the source of each one.
 
+## Will it work with your cellphone?
+
+### What is verified
+
+Three cellphones, and each one reads and writes:
+
+| Cellphone           | Sold as    | Chip     | Android | MTP interface  |
+| ------------------- | ---------- | -------- | ------- | -------------- |
+| Samsung SM-S901U    | Galaxy S22 | Qualcomm | 16      | 0x06/0x01/0x01 |
+| Motorola Moto G (5) | Moto G5    | Qualcomm | 8.1     | 0xff/0xff/0x00 |
+| Cyrus CS 24         | NUU B20    | MediaTek | 11      | 0x06/0x01/0x01 |
+
+Three makers, two chip makers, and three versions of Android that are eight
+years apart.
+
+### Why this covers more than three cellphones
+
+A cellphone gives MTP in one of two shapes. The three above give both shapes,
+and this project finds both:
+
+1. The still imaging class, 0x06/0x01/0x01, which the USB standard defines.
+2. A vendor class, 0xff/0xff/0x00, with the interface name `MTP`.
+
+The name `MTP` is the same on all three, across both shapes and both chip
+makers.
+
+For the faults, `libmtp` gives 833 Android entries the same six flags. This
+project handles each of the six with no device table. See
+`docs/08-what-libmtp-knows.md`.
+
+### What is not measured
+
+This project does not claim a number. The `libmtp` table records no interface
+class, so nobody can count how many of those 1529 devices this project finds.
+A count here would be a guess with a decimal point on it.
+
+### If your cellphone does not work
+
+Run the probe. The probe reports what your cellphone does, and where the work
+stops:
+
+```
+BSDROID_DEBUG=1 mtpprobe probe
+```
+
+The output holds one line for each USB interface, with the class, the subclass,
+the protocol, the name index and the result of each test. A cellphone with a
+third shape shows up there.
+
+For a full report:
+
+```
+sh tools/capture-device.sh <a name for your device>
+```
+
+The script hides each file name. Read the file in `docs/captures` before you
+send the file.
+
+A report from a cellphone this project does not find is the most useful thing
+you can send. Three cellphones agreed about the name of the interface. A fourth
+that disagrees changes the code.
+
 ## Licence
 
 BSD 2-Clause.
