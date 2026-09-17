@@ -17,8 +17,12 @@
 
 pub mod descriptor;
 pub mod device;
+pub mod discover;
 
 #[allow(clippy::all)]
 mod sys;
 
-pub use device::{Backend, BulkChannel, DeviceHandle, OpenDevice, TransferStatus, UsbError};
+pub use device::{
+    Backend, BulkChannel, DeviceHandle, MtpChannels, MtpDevice, OpenDevice, TransferStatus,
+    UsbError,
+};

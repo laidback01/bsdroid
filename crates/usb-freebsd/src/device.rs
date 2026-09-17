@@ -12,11 +12,11 @@
 
 use std::ffi::c_void;
 use std::fmt;
-use std::marker::PhantomData;
 use std::ptr;
+use std::rc::Rc;
 use std::time::Duration;
 
-use crate::descriptor::{ConfigDescriptor, DescriptorError, DeviceCapabilities, MtpInterface};
+use crate::descriptor::{DescriptorError, DeviceCapabilities, MtpInterface};
 use crate::sys;
 
 /// A limit on the device count.
@@ -311,9 +311,13 @@ impl Backend {
 
     /// Lists the devices the host can see.
     ///
+    /// The backend owns every device, so each handle keeps the backend alive
+    /// with an [`Rc`]. A caller therefore does not have to hold the backend
+    /// in a variable for as long as it holds a device.
+    ///
     /// The loop stops at `MAX_DEVICES`, so a library fault cannot make the loop
     /// run without end.
-    pub fn devices(&self) -> Vec<DeviceHandle<'_>> {
+    pub fn devices(self: &Rc<Self>) -> Vec<DeviceHandle> {
         let mut out = Vec::new();
         let mut cur: *mut sys::libusb20_device = ptr::null_mut();
 
@@ -327,7 +331,7 @@ impl Backend {
             }
             out.push(DeviceHandle {
                 dev: cur,
-                _marker: PhantomData,
+                backend: Rc::clone(self),
             });
         }
         out
@@ -344,13 +348,14 @@ impl Drop for Backend {
 
 /// A device the host can see but has not opened.
 ///
-/// The backend owns the device, so the handle borrows the backend.
-pub struct DeviceHandle<'a> {
+/// The backend owns the device, so the handle holds a share of the backend
+/// and keeps it alive.
+pub struct DeviceHandle {
     dev: *mut sys::libusb20_device,
-    _marker: PhantomData<&'a Backend>,
+    backend: Rc<Backend>,
 }
 
-impl<'a> DeviceHandle<'a> {
+impl DeviceHandle {
     /// The bus number of the device.
     pub fn bus(&self) -> u8 {
         // SAFETY: `self.dev` is a valid device that the backend owns.
@@ -386,7 +391,7 @@ impl<'a> DeviceHandle<'a> {
     ///
     /// `transfer_slots` gives the count of transfers the host can hold open at
     /// one time. Two slots carry MTP, one for each direction.
-    pub fn open(self, transfer_slots: u16) -> Result<OpenDevice<'a>, UsbError> {
+    pub fn open(self, transfer_slots: u16) -> Result<OpenDevice, UsbError> {
         // SAFETY: `self.dev` is a valid device.
         let rc = unsafe { sys::libusb20_dev_open(self.dev, transfer_slots) };
         if rc != 0 {
@@ -394,18 +399,26 @@ impl<'a> DeviceHandle<'a> {
         }
         Ok(OpenDevice {
             dev: self.dev,
-            _marker: PhantomData,
+            backend: self.backend,
         })
     }
 }
 
 /// A device the host has opened.
-pub struct OpenDevice<'a> {
+///
+/// The device holds a share of the backend, because the backend owns the
+/// memory the device lives in.
+pub struct OpenDevice {
     dev: *mut sys::libusb20_device,
-    _marker: PhantomData<&'a Backend>,
+    /// The backend that owns the memory `dev` points at.
+    ///
+    /// No code reads the field. The field exists so that the backend outlives
+    /// the device, and dropping it is the whole job.
+    #[allow(dead_code)]
+    backend: Rc<Backend>,
 }
 
-impl<'a> OpenDevice<'a> {
+impl OpenDevice {
     /// The speed of the link to the device.
     pub fn speed(&self) -> LinkSpeed {
         // SAFETY: `self.dev` is open.
@@ -528,35 +541,6 @@ impl<'a> OpenDevice<'a> {
         }
     }
 
-    /// Reads the configuration descriptor and finds the MTP interface.
-    ///
-    /// The function reads the name of an interface when the class alone does
-    /// not say that the interface carries MTP. A Motorola Moto G (5) needs the
-    /// name, and a Samsung SM-S901U does not.
-    pub fn find_mtp_interface(&mut self, timeout: Duration) -> Result<MtpInterface, UsbError> {
-        let raw = self.config_descriptor_raw(timeout)?;
-        let cfg = ConfigDescriptor::parse(&raw)?;
-
-        // The closure needs the device, and `find_with_names` borrows the
-        // closure. Read every name the search could need first.
-        let mut names: Vec<(u8, Option<String>)> = Vec::new();
-        for i in cfg
-            .interfaces
-            .iter()
-            .filter(|i| i.is_vendor_mtp_candidate())
-        {
-            let name = self.string_descriptor(i.string_index);
-            names.push((i.string_index, name));
-        }
-
-        Ok(MtpInterface::find_with_names(&cfg, |idx| {
-            names
-                .iter()
-                .find(|(i, _)| *i == idx)
-                .and_then(|(_, n)| n.clone())
-        })?)
-    }
-
     /// Sends a class request to an interface, with no data.
     ///
     /// The request type is 0x21, which means host to device, class, and
@@ -641,105 +625,122 @@ impl<'a> OpenDevice<'a> {
         Ok(())
     }
 
-    /// Opens one bulk endpoint and gives a channel for transfers.
+    /// Opens the two bulk endpoints of an MTP interface, and takes the device.
     ///
-    /// `slot` chooses a transfer slot. Each open endpoint needs its own slot,
-    /// and `slot` must be below the count given to [`DeviceHandle::open`].
-    pub fn open_bulk(
-        &mut self,
-        slot: u16,
-        endpoint: u8,
-        buffer_size: u32,
-    ) -> Result<BulkChannel<'_>, UsbError> {
-        // SAFETY: `self.dev` is open, and the library gives a transfer for the
-        // slot or null.
-        let xfer = unsafe { sys::libusb20_tr_get_pointer(self.dev, slot) };
-        if xfer.is_null() {
-            return Err(UsbError::EndpointOpen { endpoint, code: -1 });
-        }
+    /// The answer owns the device and both transfers, so no part of it borrows
+    /// another part.
+    ///
+    /// An earlier version gave back channels that borrowed the device. A
+    /// caller that wanted to hold both in one struct had to box the device,
+    /// make a `&'static mut` from the box with `unsafe`, and then move the box
+    /// into the same struct. That pattern is unsound: a `Box` carries a
+    /// promise of unique access, and the move invalidates every pointer taken
+    /// from it. It worked only because a channel holds a pointer that
+    /// `libusb20` owns, and never a pointer into the box.
+    pub fn into_mtp(self, iface: &MtpInterface, buffer_size: u32) -> Result<MtpDevice, UsbError> {
+        // SAFETY: the two calls use two different slots, so the transfers do
+        // not share state. `MtpDevice` owns the device, so each pointer stays
+        // valid for as long as the channels do.
+        let write = unsafe {
+            let xfer = sys::libusb20_tr_get_pointer(self.dev, 0);
+            open_transfer(xfer, iface.bulk_out, buffer_size)?
+        };
+        let read = unsafe {
+            let xfer = sys::libusb20_tr_get_pointer(self.dev, 1);
+            open_transfer(xfer, iface.bulk_in, buffer_size)?
+        };
 
-        // SAFETY: `xfer` is a valid transfer for this device. One frame is
-        // enough, because the channel does one transfer at a time.
-        let rc = unsafe { sys::libusb20_tr_open(xfer, buffer_size, 1, endpoint) };
-        if rc != 0 {
-            return Err(UsbError::EndpointOpen { endpoint, code: rc });
-        }
-
-        Ok(BulkChannel {
-            xfer,
-            endpoint,
-            _marker: PhantomData,
+        Ok(MtpDevice {
+            channels: MtpChannels { write, read },
+            device: self,
         })
-    }
-
-    /// Opens the two bulk endpoints of an MTP interface.
-    ///
-    /// One call gives both channels. A caller cannot borrow the device two
-    /// times, so a caller cannot open the two endpoints in two calls.
-    pub fn open_mtp(
-        &mut self,
-        iface: &MtpInterface,
-        buffer_size: u32,
-    ) -> Result<MtpChannels<'_>, UsbError> {
-        // SAFETY: the two calls below use two different slots, so the two
-        // transfers do not share state. Each raw pointer stays valid while the
-        // device is open, and `MtpChannels` borrows the device.
-        let write = {
-            let xfer = unsafe { sys::libusb20_tr_get_pointer(self.dev, 0) };
-            open_one(xfer, iface.bulk_out, buffer_size)?
-        };
-        let read = {
-            let xfer = unsafe { sys::libusb20_tr_get_pointer(self.dev, 1) };
-            open_one(xfer, iface.bulk_in, buffer_size)?
-        };
-        Ok(MtpChannels { write, read })
     }
 }
 
 /// Opens one transfer for an endpoint.
-fn open_one<'a>(
+///
+/// # Safety
+///
+/// `xfer` must be null, or a transfer that an open device owns.
+unsafe fn open_transfer(
     xfer: *mut sys::libusb20_transfer,
     endpoint: u8,
     buffer_size: u32,
-) -> Result<BulkChannel<'a>, UsbError> {
+) -> Result<BulkChannel, UsbError> {
     if xfer.is_null() {
         return Err(UsbError::EndpointOpen { endpoint, code: -1 });
     }
-    // SAFETY: `xfer` is a valid transfer that the open device owns.
+    // SAFETY: the caller promises that `xfer` belongs to an open device. One
+    // frame is enough, because a channel does one transfer at a time.
     let rc = unsafe { sys::libusb20_tr_open(xfer, buffer_size, 1, endpoint) };
     if rc != 0 {
         return Err(UsbError::EndpointOpen { endpoint, code: rc });
     }
-    Ok(BulkChannel {
-        xfer,
-        endpoint,
-        _marker: PhantomData,
-    })
+    Ok(BulkChannel { xfer, endpoint })
+}
+
+/// A device with both MTP bulk endpoints open.
+///
+/// The type owns everything it needs: the two transfers, the device, and a
+/// share of the backend that the device lives in. A caller can hold it in a
+/// struct, move it, and return it from a function, with no lifetime to carry
+/// and no `unsafe` at the call site.
+pub struct MtpDevice {
+    // The field order sets the order of the drop. The transfers must close
+    // before the device, and the device before the backend.
+    channels: MtpChannels,
+    device: OpenDevice,
+}
+
+impl MtpDevice {
+    /// The two bulk channels.
+    pub fn channels(&mut self) -> &mut MtpChannels {
+        &mut self.channels
+    }
+
+    /// The speed of the link to the device.
+    pub fn speed(&self) -> LinkSpeed {
+        self.device.speed()
+    }
+
+    /// Resets the device.
+    ///
+    /// A reset goes to the USB port, and the device then starts again. The
+    /// node name can change, so a caller that named a node must read the name
+    /// again.
+    pub fn reset(&mut self) -> Result<(), UsbError> {
+        self.device.reset()
+    }
 }
 
 /// The two bulk channels of an MTP interface.
-pub struct MtpChannels<'a> {
+pub struct MtpChannels {
     /// The channel that sends data to the device.
-    pub write: BulkChannel<'a>,
+    pub write: BulkChannel,
     /// The channel that reads data from the device.
-    pub read: BulkChannel<'a>,
+    pub read: BulkChannel,
 }
 
-impl Drop for OpenDevice<'_> {
+impl Drop for OpenDevice {
     fn drop(&mut self) {
-        // SAFETY: `self.dev` is open, and this code runs one time.
+        // SAFETY: `self.dev` is open, and this code runs one time. The backend
+        // that owns the memory drops after this, because `self.backend` is a
+        // field and a field drops after the body of `drop`.
         unsafe { sys::libusb20_dev_close(self.dev) };
     }
 }
 
 /// One bulk endpoint, open for transfers.
-pub struct BulkChannel<'a> {
+///
+/// The type holds a pointer that `libusb20` owns, and it is reachable only
+/// through the [`MtpDevice`] that owns the device. That ownership, and not a
+/// lifetime parameter, is what keeps the pointer valid.
+pub struct BulkChannel {
     xfer: *mut sys::libusb20_transfer,
     endpoint: u8,
-    _marker: PhantomData<&'a mut ()>,
 }
 
-impl BulkChannel<'_> {
+impl BulkChannel {
     /// The address of the endpoint.
     pub fn endpoint(&self) -> u8 {
         self.endpoint
@@ -807,7 +808,7 @@ impl BulkChannel<'_> {
     }
 }
 
-impl Drop for BulkChannel<'_> {
+impl Drop for BulkChannel {
     fn drop(&mut self) {
         // SAFETY: `self.xfer` is open, and this code runs one time. The drain
         // waits for a transfer that is still in progress.

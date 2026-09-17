@@ -23,7 +23,7 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use ptp_proto::{op, resp, Container, ContainerType, Header, ParseError, PayloadTooLarge};
-use usb_freebsd::device::{MtpChannels, UsbError};
+use usb_freebsd::device::{MtpDevice, UsbError};
 
 /// The smallest read buffer the crate accepts.
 ///
@@ -354,8 +354,12 @@ pub fn needs_zero_packet(total: u64, packet: u64) -> bool {
 }
 
 /// One MTP session.
-pub struct Session<'a> {
-    channels: MtpChannels<'a>,
+///
+/// The session owns the device, so it carries no lifetime. An earlier version
+/// borrowed two channels from a device the caller held, and a caller that
+/// wanted both in one struct had to launder the lifetimes with `unsafe`.
+pub struct Session {
+    device: MtpDevice,
     transaction: u32,
     config: Config,
     /// True while the host holds a session that it opened.
@@ -366,7 +370,7 @@ pub struct Session<'a> {
     session_open: bool,
 }
 
-impl<'a> Session<'a> {
+impl Session {
     /// Starts a session over two open bulk channels.
     ///
     /// The function does not send `OpenSession`. A caller does that, so a
@@ -375,9 +379,9 @@ impl<'a> Session<'a> {
     /// The function puts the endpoints in a known state first, and gives the
     /// count of bytes it dropped. A program that stopped in the middle of a
     /// transfer leaves the device with bytes to send.
-    pub fn new(channels: MtpChannels<'a>, config: Config) -> (Self, u64) {
+    pub fn new(device: MtpDevice, config: Config) -> (Self, u64) {
         let mut s = Self {
-            channels,
+            device,
             transaction: 0,
             config: config.normalised(),
             session_open: false,
@@ -390,9 +394,9 @@ impl<'a> Session<'a> {
     ///
     /// The step costs [`DRAIN_FIRST_MILLIS`] on a device that works. A caller
     /// that measures the cost of a session start needs this function.
-    pub fn new_without_recovery(channels: MtpChannels<'a>, config: Config) -> Self {
+    pub fn new_without_recovery(device: MtpDevice, config: Config) -> Self {
         Self {
-            channels,
+            device,
             transaction: 0,
             config: config.normalised(),
             session_open: false,
@@ -402,6 +406,14 @@ impl<'a> Session<'a> {
     /// The configuration the session uses.
     pub fn config(&self) -> Config {
         self.config
+    }
+
+    /// Resets the device on the USB port.
+    ///
+    /// A caller uses this after it closes the session. The device starts
+    /// again, and its node name can change.
+    pub fn reset_device(&mut self) -> Result<(), UsbError> {
+        self.device.reset()
     }
 
     /// Changes the size of one read.
@@ -682,17 +694,21 @@ impl<'a> Session<'a> {
     }
 
     fn write_all(&mut self, step: &'static str, bytes: &[u8]) -> Result<(), SessionError> {
-        self.channels
+        let timeout = self.config.timeout;
+        self.device
+            .channels()
             .write
-            .write(bytes, self.config.timeout)
+            .write(bytes, timeout)
             .map(|_| ())
             .map_err(|source| SessionError::Usb { step, source })
     }
 
     fn read_once(&mut self, step: &'static str, buf: &mut [u8]) -> Result<usize, SessionError> {
-        self.channels
+        let timeout = self.config.timeout;
+        self.device
+            .channels()
             .read
-            .read(buf, self.config.timeout)
+            .read(buf, timeout)
             .map_err(|source| SessionError::Usb { step, source })
     }
 
@@ -707,8 +723,8 @@ impl<'a> Session<'a> {
     /// reads and drops the bytes the device still holds. A new session starts
     /// with this function, so a user does not need to pull the cable.
     pub fn recover(&mut self) -> u64 {
-        self.channels.write.clear_stall();
-        self.channels.read.clear_stall();
+        self.device.channels().write.clear_stall();
+        self.device.channels().read.clear_stall();
         self.drain()
     }
 
@@ -734,7 +750,7 @@ impl<'a> Session<'a> {
         let rest = Duration::from_millis(DRAIN_REST_MILLIS);
 
         for _ in 0..MAX_READ_ROUNDS {
-            match self.channels.read.read(&mut buf, deadline) {
+            match self.device.channels().read.read(&mut buf, deadline) {
                 Ok(0) => break,
                 Ok(n) => {
                     dropped += n as u64;
@@ -810,7 +826,7 @@ impl<'a> Session<'a> {
     }
 }
 
-impl Drop for Session<'_> {
+impl Drop for Session {
     /// Closes the session that the host opened.
     ///
     /// A command that fails returns early, and an early return leaves the

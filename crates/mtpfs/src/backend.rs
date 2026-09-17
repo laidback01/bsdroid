@@ -5,12 +5,13 @@
 //! many operations, so one session is right. See `docs/07-filesystem-design.md`.
 
 use std::io::Read;
+use std::rc::Rc;
 use std::time::Duration;
 
 use mtp_session::{Config, Session, SessionError};
 use ptp_proto::{association, op, prop, resp, DeviceInfo, ObjectInfo, ParseError};
-use usb_freebsd::descriptor::{ConfigDescriptor, MtpInterface};
 use usb_freebsd::device::{Backend as UsbBackend, UsbError};
+use usb_freebsd::discover;
 
 use crate::tree::{Entry, ROOT};
 
@@ -289,17 +290,6 @@ pub fn split_final_read(offset: u64, want: u64, file_size: u64, packet: u64) -> 
     }
 }
 
-/// Reads a node name, and gives the bus and the address.
-///
-/// The function takes `ugen0.11` and `/dev/ugen0.11`, which are the two forms
-/// a person writes.
-pub fn parse_node(s: &str) -> Option<(u8, u8)> {
-    let s = s.strip_prefix("/dev/").unwrap_or(s);
-    let s = s.strip_prefix("ugen")?;
-    let (bus, addr) = s.split_once('.')?;
-    Some((bus.parse().ok()?, addr.parse().ok()?))
-}
-
 /// The bytes the host read in advance, for one object.
 struct ReadCache {
     handle: u32,
@@ -324,11 +314,10 @@ impl ReadCache {
 
 /// The session a mount holds open.
 pub struct Mtp {
-    // The order of the fields sets the order of the drop. The session must
-    // close before the device, and the device before the backend.
-    session: Session<'static>,
-    _device: Box<usb_freebsd::device::OpenDevice<'static>>,
-    _backend: Box<UsbBackend>,
+    /// The session owns the device and both transfers, and the device owns a
+    /// share of the backend. There is no borrow between the fields, so this
+    /// struct needs no `unsafe` and no lifetime.
+    session: Session,
     settings: Settings,
     storage: u32,
     /// The operation code the device uses for a partial read.
@@ -356,55 +345,19 @@ impl Mtp {
     /// The function gives the node name, the identifiers and the name of the
     /// maker, for a person to read.
     pub fn list_devices(settings: Settings) -> Result<Vec<DeviceEntry>, Error> {
-        let backend = UsbBackend::new()?;
-        let mut out = Vec::new();
+        let backend = Rc::new(UsbBackend::new()?);
 
-        for d in backend.devices() {
-            let (vid, pid) = d.ids();
-            let bus = d.bus();
-            let addr = d.address();
-
-            let mut open = match d.open(4) {
-                Ok(o) => o,
-                Err(_) => continue,
-            };
-            let raw = match open.config_descriptor_raw(settings.timeout) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let cfg = match ConfigDescriptor::parse(&raw) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let mut names: Vec<(u8, Option<String>)> = Vec::new();
-            for i in cfg
-                .interfaces
-                .iter()
-                .filter(|i| i.is_vendor_mtp_candidate())
-            {
-                names.push((i.string_index, open.string_descriptor(i.string_index)));
-            }
-            let found = MtpInterface::find_with_names(&cfg, |idx| {
-                names
-                    .iter()
-                    .find(|(i, _)| *i == idx)
-                    .and_then(|(_, n)| n.clone())
-            });
-            if found.is_ok() {
-                // String 1 holds the maker, and string 2 holds the model.
-                let maker = open.string_descriptor(1).unwrap_or_default();
-                let model = open.string_descriptor(2).unwrap_or_default();
-                out.push(DeviceEntry {
-                    node: format!("ugen{bus}.{addr}"),
-                    bus,
-                    address: addr,
-                    vendor_id: vid,
-                    product_id: pid,
-                    name: format!("{maker} {model}").trim().to_string(),
-                });
-            }
-        }
-        Ok(out)
+        Ok(discover::list(&backend, settings.timeout)
+            .into_iter()
+            .map(|mut f| DeviceEntry {
+                node: f.node(),
+                bus: f.bus,
+                address: f.address,
+                vendor_id: f.vendor_id,
+                product_id: f.product_id,
+                name: f.name(),
+            })
+            .collect())
     }
 
     /// Finds a device, opens a session, and reads what the device can do.
@@ -416,72 +369,27 @@ impl Mtp {
     /// because a filesystem cannot work without that operation.
     pub fn open(node: Option<&str>, settings: Settings) -> Result<Self, Error> {
         let want = match node {
-            Some(n) => Some(parse_node(n).ok_or_else(|| Error::BadNode(n.to_string()))?),
+            Some(n) => Some(discover::parse_node(n).ok_or_else(|| Error::BadNode(n.to_string()))?),
             None => None,
         };
-        // The backend owns the devices, and the channels borrow the device.
-        // A box gives each one a fixed address, and the code then makes the
-        // lifetimes static by hand.
-        let backend = Box::new(UsbBackend::new()?);
-        let backend_ref: &'static UsbBackend = unsafe { &*(&*backend as *const UsbBackend) };
+        // Every handle holds a share of the backend, so the backend lives for
+        // as long as the device does. An earlier version boxed the backend and
+        // the device and made two `&'static` references with `unsafe`.
+        let backend = Rc::new(UsbBackend::new()?);
 
-        let mut chosen = None;
-        for d in backend_ref.devices() {
-            // A caller that names a device gets that device, and no other.
-            if let Some((bus, addr)) = want {
-                if d.bus() != bus || d.address() != addr {
-                    continue;
-                }
-            }
-            let mut open = match d.open(4) {
-                Ok(o) => o,
-                Err(_) => continue,
-            };
-            let raw = match open.config_descriptor_raw(settings.timeout) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let cfg = match ConfigDescriptor::parse(&raw) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let mut names: Vec<(u8, Option<String>)> = Vec::new();
-            for i in cfg
-                .interfaces
-                .iter()
-                .filter(|i| i.is_vendor_mtp_candidate())
-            {
-                names.push((i.string_index, open.string_descriptor(i.string_index)));
-            }
-            let found = MtpInterface::find_with_names(&cfg, |idx| {
-                names
-                    .iter()
-                    .find(|(i, _)| *i == idx)
-                    .and_then(|(_, n)| n.clone())
-            });
-            if let Ok(iface) = found {
-                chosen = Some((open, iface));
-                break;
-            }
+        let found = discover::find(&backend, want, settings.timeout).ok_or_else(|| match node {
+            Some(n) => Error::NamedDeviceNotFound(n.to_string()),
+            None => Error::NoDevice,
+        })?;
+        let (mut open, iface) = (found.device, found.iface);
+
+        if open.kernel_driver_active(iface.interface_number) {
+            let _ = open.detach_kernel_driver(iface.interface_number);
         }
 
-        let (open, iface) = match chosen {
-            Some(v) => v,
-            None => {
-                return Err(match node {
-                    Some(n) => Error::NamedDeviceNotFound(n.to_string()),
-                    None => Error::NoDevice,
-                })
-            }
-        };
-        let mut device = Box::new(open);
-        if device.kernel_driver_active(iface.interface_number) {
-            let _ = device.detach_kernel_driver(iface.interface_number);
-        }
-
-        let device_ref: &'static mut usb_freebsd::device::OpenDevice<'static> =
-            unsafe { &mut *(&mut *device as *mut _) };
-        let channels = device_ref.open_mtp(&iface, BULK_BUFFER)?;
+        // The device and both transfers go into one owner, so no field of
+        // `Mtp` borrows another field.
+        let device = open.into_mtp(&iface, BULK_BUFFER)?;
 
         let config = Config {
             timeout: settings.timeout,
@@ -493,15 +401,13 @@ impl Mtp {
 
         // The session clears the endpoints and drops what an earlier program
         // left behind.
-        let (session, dropped) = Session::new(channels, config);
+        let (session, dropped) = Session::new(device, config);
         if settings.debug && dropped > 0 {
             eprintln!("mtpfs: the device still held {dropped} bytes, and the host dropped them");
         }
 
         let mut m = Self {
             session,
-            _device: device,
-            _backend: backend,
             settings,
             storage: 0,
             partial_read: op::GET_PARTIAL_OBJECT,
@@ -1079,7 +985,7 @@ impl Drop for Mtp {
         // and the device then starts again. The node name of the device can
         // change, so a caller who names a node must read the name again.
         if self.settings.usb_reset {
-            if let Err(e) = self._device.reset() {
+            if let Err(e) = self.session.reset_device() {
                 eprintln!("mtpfs: the USB reset failed: {e}");
             }
         }

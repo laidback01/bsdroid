@@ -7,12 +7,14 @@
 //! Every step has a deadline. The program always stops.
 
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use mtp_session::{Config, Session, SessionOpen};
 use ptp_proto::{association, op, resp, DeviceInfo, ObjectInfo, StorageInfo};
-use usb_freebsd::descriptor::{ConfigDescriptor, MtpInterface};
-use usb_freebsd::device::{Backend, LinkSpeed, MtpChannels, OpenDevice};
+use usb_freebsd::descriptor::MtpInterface;
+use usb_freebsd::device::{Backend, LinkSpeed, MtpDevice, OpenDevice};
+use usb_freebsd::discover::{self, Node};
 
 /// The deadline for one transfer.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -37,12 +39,12 @@ fn config_for(iface: &MtpInterface) -> Config {
 /// The session layer writes nothing, so the words live here. The function
 /// prints a line for each repair the host had to do, and nothing at all when
 /// the device answers the first time.
-fn start_session<'a>(
-    channels: MtpChannels<'a>,
+fn start_session(
+    device: MtpDevice,
     iface: &MtpInterface,
     id: u32,
-) -> Result<(Session<'a>, SessionOpen), String> {
-    let (mut s, dropped) = Session::new(channels, config_for(iface));
+) -> Result<(Session, SessionOpen), String> {
+    let (mut s, dropped) = Session::new(device, config_for(iface));
     if dropped > 0 {
         println!("    the device still held {dropped} bytes, and the host dropped them");
     }
@@ -76,20 +78,32 @@ fn main() -> ExitCode {
     println!("timeout per transfer: {} ms", TIMEOUT.as_millis());
     println!();
 
+    // `-d ugen0.11` chooses a device. An earlier version always took the
+    // first device it found, so a host with two cellphones could reach only
+    // one of them.
+    let (node, args) = match split_device(&args) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("mtpprobe: {e}");
+            usage();
+            return ExitCode::FAILURE;
+        }
+    };
+
     let result = match args.first().map(String::as_str) {
-        None | Some("probe") => probe(),
+        None | Some("probe") => probe(node),
         Some("reopen") => {
             let cycles = args
                 .get(1)
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(DEFAULT_CYCLES);
-            reopen(cycles)
+            reopen(node, cycles)
         }
-        Some("coldstart") => coldstart(),
-        Some("objects") => objects(),
-        Some("get") => get(args.get(1).and_then(|s| parse_handle(s))),
-        Some("bench") => bench(),
-        Some("caps") => caps(),
+        Some("coldstart") => coldstart(node),
+        Some("objects") => objects(node),
+        Some("get") => get(node, args.get(1).and_then(|s| parse_handle(s))),
+        Some("bench") => bench(node),
+        Some("caps") => caps(node),
         Some("--help") | Some("-h") => {
             usage();
             return ExitCode::SUCCESS;
@@ -115,7 +129,39 @@ fn main() -> ExitCode {
     }
 }
 
+/// The device the user chose, and the arguments that remain.
+type Chosen = (Option<Node>, Vec<String>);
+
+/// Takes `-d <node>` off the front of the arguments.
+///
+/// The answer holds the device the user chose, and the arguments that remain.
+fn split_device(args: &[String]) -> Result<Chosen, String> {
+    let mut node = None;
+    let mut rest = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-d" || args[i] == "--device" {
+            let name = args
+                .get(i + 1)
+                .ok_or_else(|| format!("{} needs the name of a device", args[i]))?;
+            node = Some(
+                discover::parse_node(name)
+                    .ok_or_else(|| format!("{name} does not read as a device node"))?,
+            );
+            i += 2;
+            continue;
+        }
+        rest.push(args[i].clone());
+        i += 1;
+    }
+
+    Ok((node, rest))
+}
+
 fn usage() {
+    println!("Usage: mtpprobe [-d <node>] <command> [argument]");
+    println!();
     println!("Commands:");
     println!("  mtpprobe probe          Read the device one time. This is the default.");
     println!("  mtpprobe reopen [n]     Open and close the USB device n times.");
@@ -125,6 +171,9 @@ fn usage() {
     println!("  mtpprobe bench          Measure the rate of the USB link.");
     println!("  mtpprobe caps           List what the device can do.");
     println!();
+    println!("Without -d, every command takes the first cellphone it finds.");
+    println!("A node name looks like ugen0.11. Run `mtpfs -l` for a list.");
+    println!();
     println!("The get command takes a handle in decimal or in hexadecimal, such");
     println!("as 0x1a. The command takes the smallest file if you give no handle.");
     println!();
@@ -132,89 +181,60 @@ fn usage() {
     println!("See docs/00-why.md.");
 }
 
-/// Finds the first device that gives an MTP interface, and opens the device.
-fn find_mtp(backend: &Backend, quiet: bool) -> Result<(OpenDevice<'_>, MtpInterface), String> {
-    let devices = backend.devices();
+/// Finds a device that gives an MTP interface, and opens the device.
+///
+/// `node` names one device, as `ugen0.11` does. A value of `None` takes the
+/// first device the host finds.
+fn find_mtp(
+    backend: &Rc<Backend>,
+    node: Option<Node>,
+    quiet: bool,
+) -> Result<(OpenDevice, MtpInterface), String> {
     if !quiet {
-        println!("The host sees {} USB devices.", devices.len());
+        println!("The host sees {} USB devices.", backend.devices().len());
     }
 
-    for d in devices {
-        let (vid, pid) = d.ids();
-        let bus = d.bus();
-        let addr = d.address();
+    let found = match discover::find(backend, node, TIMEOUT) {
+        Some(f) => f,
+        None => return Err(no_mtp_message(backend, node)),
+    };
 
-        // A device the host cannot open is not a fault. Many devices belong to
-        // a kernel driver.
-        let mut open = match d.open(4) {
-            Ok(o) => o,
-            Err(_) => continue,
-        };
-        let raw = match open.config_descriptor_raw(TIMEOUT) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let cfg = match ConfigDescriptor::parse(&raw) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        // Read the name of an interface when the class alone does not say that
-        // the interface carries MTP. A Motorola Moto G (5) needs the name.
-        let debug = std::env::var("BSDROID_DEBUG").is_ok();
-        if debug {
+    if std::env::var_os("BSDROID_DEBUG").is_some() {
+        println!(
+            "  [debug] device {:#06x}:{:#06x} has {} interface(s)",
+            found.vendor_id,
+            found.product_id,
+            found.config.interfaces.len()
+        );
+        for i in &found.config.interfaces {
             println!(
-                "  [debug] device {vid:#06x}:{pid:#06x} has {} interface(s)",
-                cfg.interfaces.len()
+                "  [debug]   iface {} class {:#04x}/{:#04x}/{:#04x} iInterface {} mtp={} vendor_candidate={}",
+                i.number, i.class, i.subclass, i.protocol, i.string_index,
+                i.is_mtp(), i.is_vendor_mtp_candidate()
             );
-            for i in &cfg.interfaces {
-                println!(
-                    "  [debug]   iface {} class {:#04x}/{:#04x}/{:#04x} iInterface {} mtp={} vendor_candidate={}",
-                    i.number, i.class, i.subclass, i.protocol, i.string_index,
-                    i.is_mtp(), i.is_vendor_mtp_candidate()
-                );
-            }
-        }
-
-        let mut names: Vec<(u8, Option<String>)> = Vec::new();
-        for i in cfg
-            .interfaces
-            .iter()
-            .filter(|i| i.is_vendor_mtp_candidate())
-        {
-            let n = open.string_descriptor(i.string_index);
-            if debug {
-                println!("  [debug]   string {} = {:?}", i.string_index, n);
-            }
-            names.push((i.string_index, n));
-        }
-        let found = MtpInterface::find_with_names(&cfg, |idx| {
-            names
-                .iter()
-                .find(|(i, _)| *i == idx)
-                .and_then(|(_, n)| n.clone())
-        });
-
-        if let Ok(iface) = found {
-            if !quiet {
-                println!();
-                println!("MTP device found:");
-                println!("  bus {bus}, address {addr}");
-                println!("  vendor {vid:#06x}, product {pid:#06x}");
-                println!("  interface {}", iface.interface_number);
-                println!("  bulk in   {:#04x}", iface.bulk_in);
-                println!("  bulk out  {:#04x}", iface.bulk_out);
-                match iface.interrupt_in {
-                    Some(e) => println!("  event in  {e:#04x}"),
-                    None => println!("  event in  none"),
-                }
-                println!("  packet size {} bytes", iface.max_packet_size);
-            }
-            return Ok((open, iface));
         }
     }
 
-    Err(no_mtp_message(backend))
+    if !quiet {
+        println!();
+        println!("MTP device found:");
+        println!("  node {}", found.node());
+        println!("  bus {}, address {}", found.bus, found.address);
+        println!(
+            "  vendor {:#06x}, product {:#06x}",
+            found.vendor_id, found.product_id
+        );
+        println!("  interface {}", found.iface.interface_number);
+        println!("  bulk in   {:#04x}", found.iface.bulk_in);
+        println!("  bulk out  {:#04x}", found.iface.bulk_out);
+        match found.iface.interrupt_in {
+            Some(e) => println!("  event in  {e:#04x}"),
+            None => println!("  event in  none"),
+        }
+        println!("  packet size {} bytes", found.iface.max_packet_size);
+    }
+
+    Ok((found.device, found.iface))
 }
 
 /// Builds a message for the case where no device gives an MTP interface.
@@ -222,35 +242,17 @@ fn find_mtp(backend: &Backend, quiet: bool) -> Result<(OpenDevice<'_>, MtpInterf
 /// The message names the cause when the host can tell the cause. An Android
 /// device that is not in file transfer mode still shows adb, if the user turned
 /// on USB debugging. The adb interface is the sign.
-fn no_mtp_message(backend: &Backend) -> String {
-    let mut android_without_mtp = Vec::new();
-
-    for d in backend.devices() {
-        let (vid, pid) = d.ids();
-        let bus = d.bus();
-        let addr = d.address();
-
-        let mut open = match d.open(4) {
-            Ok(o) => o,
-            Err(_) => continue,
-        };
-        let raw = match open.config_descriptor_raw(TIMEOUT) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let cfg = match ConfigDescriptor::parse(&raw) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        if cfg.interfaces.iter().any(|i| i.is_adb()) {
-            android_without_mtp.push(format!(
-                "bus {bus}, address {addr}, vendor {vid:#06x}, product {pid:#06x}"
-            ));
-        }
+fn no_mtp_message(backend: &Rc<Backend>, node: Option<Node>) -> String {
+    if let Some((bus, address)) = node {
+        return format!(
+            "ugen{bus}.{address} gives no MTP interface. Run `mtpfs -l` for a list \n  \
+             of the devices that do."
+        );
     }
 
-    if android_without_mtp.is_empty() {
+    let android = discover::android_without_mtp(backend, TIMEOUT);
+
+    if android.is_empty() {
         return "no device gives an MTP interface. Connect the phone, unlock \
                 the phone, and choose File transfer on the phone."
             .to_string();
@@ -265,19 +267,22 @@ fn no_mtp_message(backend: &Backend) -> String {
     m.push_str("    3. Choose file transfer.\n\n");
     m.push_str("  The name is not the same on each cellphone. These are the\n");
     m.push_str("  names the project has seen:\n");
-    m.push_str("    Transferring Files / Android Auto\n");
-    m.push_str("    File Transfer\n");
-    m.push_str("    Transfer files\n\n");
-    for d in &android_without_mtp {
-        m.push_str(&format!("  device: {d}\n"));
+    for name in FILE_MODE_NAMES {
+        m.push_str(&format!("    {name}\n"));
+    }
+    m.push('\n');
+    for (bus, address, vid, pid) in &android {
+        m.push_str(&format!(
+            "  device: ugen{bus}.{address}, vendor {vid:#06x}, product {pid:#06x}\n"
+        ));
     }
     m
 }
 
 /// Reads the device one time.
-fn probe() -> Result<(), String> {
-    let backend = Backend::new().map_err(|e| e.to_string())?;
-    let (mut open, iface) = find_mtp(&backend, false)?;
+fn probe(node: Option<Node>) -> Result<(), String> {
+    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
+    let (mut open, iface) = find_mtp(&backend, node, false)?;
 
     if open.kernel_driver_active(iface.interface_number) {
         println!("  a kernel driver holds the interface, and the probe detaches it");
@@ -302,13 +307,13 @@ fn probe() -> Result<(), String> {
         }
     }
 
-    let channels = open
-        .open_mtp(&iface, BULK_BUFFER)
+    let device = open
+        .into_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
 
     println!();
     println!("--- Session 1 ---");
-    let (mut s, opened) = start_session(channels, &iface, 1)?;
+    let (mut s, opened) = start_session(device, &iface, 1)?;
     let o = opened.outcome;
     println!(
         "    {:<16} {:>6} ms   {:#06x} {}",
@@ -384,7 +389,7 @@ fn probe() -> Result<(), String> {
 /// This test repeats the pattern that `simple-mtpfs` uses. A USB device open
 /// is not the same as a PTP session open. The PTP session cycle already works,
 /// so the USB device cycle is the difference that no test covers yet.
-fn reopen(cycles: u32) -> Result<(), String> {
+fn reopen(node: Option<Node>, cycles: u32) -> Result<(), String> {
     println!("--- USB device open and close cycle ---");
     println!("The test opens the USB device, reads the storage, and closes the");
     println!("device. The test repeats the cycle {cycles} times.");
@@ -393,11 +398,11 @@ fn reopen(cycles: u32) -> Result<(), String> {
     println!("session cycle already works. See docs/00-why.md.");
     println!();
 
-    let backend = Backend::new().map_err(|e| e.to_string())?;
+    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
 
     // Check one time that a device is present, and show the device.
     {
-        let (_open, _iface) = find_mtp(&backend, false)?;
+        let (_open, _iface) = find_mtp(&backend, node, false)?;
     }
     println!();
 
@@ -410,14 +415,14 @@ fn reopen(cycles: u32) -> Result<(), String> {
         // The whole cycle sits in a block, so every handle closes at the end
         // of the block. The close is the part under test.
         let outcome = (|| -> Result<u16, String> {
-            let (mut open, iface) = find_mtp(&backend, true)?;
+            let (mut open, iface) = find_mtp(&backend, node, true)?;
             if open.kernel_driver_active(iface.interface_number) {
                 let _ = open.detach_kernel_driver(iface.interface_number);
             }
-            let channels = open
-                .open_mtp(&iface, BULK_BUFFER)
+            let device = open
+                .into_mtp(&iface, BULK_BUFFER)
                 .map_err(|e| format!("cannot open the endpoints: {e}"))?;
-            let (mut s, _) = start_session(channels, &iface, 1)?;
+            let (mut s, _) = start_session(device, &iface, 1)?;
             let ids = s
                 .operation("GetStorageIDs", op::GET_STORAGE_IDS, &[])
                 .map_err(|e| format!("{e}"))?;
@@ -478,9 +483,9 @@ fn reopen(cycles: u32) -> Result<(), String> {
 ///
 /// The object count also separates file transfer mode from image mode. See
 /// `docs/02-device-states.md`.
-fn objects() -> Result<(), String> {
-    let backend = Backend::new().map_err(|e| e.to_string())?;
-    let (mut open, iface) = find_mtp(&backend, false)?;
+fn objects(node: Option<Node>) -> Result<(), String> {
+    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
+    let (mut open, iface) = find_mtp(&backend, node, false)?;
     if open.kernel_driver_active(iface.interface_number) {
         let _ = open.detach_kernel_driver(iface.interface_number);
     }
@@ -502,10 +507,10 @@ fn objects() -> Result<(), String> {
         }
     }
 
-    let channels = open
-        .open_mtp(&iface, BULK_BUFFER)
+    let device = open
+        .into_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let (mut s, _) = start_session(channels, &iface, 1)?;
+    let (mut s, _) = start_session(device, &iface, 1)?;
     let w = wait_for_storage(&mut s)?;
     if w.ids.is_empty() {
         report_no_storage(&w);
@@ -600,9 +605,9 @@ const BENCH_SEARCH: usize = 120;
 /// The benchmark uses the files of the device, because the project cannot ship
 /// a file. The sizes are therefore not the same on two phones. The report
 /// gives the size of each file, so a reader can compare two reports.
-fn bench() -> Result<(), String> {
-    let backend = Backend::new().map_err(|e| e.to_string())?;
-    let (mut open, iface) = find_mtp(&backend, false)?;
+fn bench(node: Option<Node>) -> Result<(), String> {
+    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
+    let (mut open, iface) = find_mtp(&backend, node, false)?;
 
     let speed = open.speed();
     println!();
@@ -676,10 +681,10 @@ fn bench() -> Result<(), String> {
         }
     }
 
-    let channels = open
-        .open_mtp(&iface, BULK_BUFFER)
+    let device = open
+        .into_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let (mut s, _) = start_session(channels, &iface, 1)?;
+    let (mut s, _) = start_session(device, &iface, 1)?;
     let w = wait_for_storage(&mut s)?;
     if w.ids.is_empty() {
         report_no_storage(&w);
@@ -880,16 +885,16 @@ fn human(bytes: usize) -> String {
 /// `GetDeviceInfo` gives the operations a device supports. The list decides
 /// what a filesystem on top of the device can do, so a filesystem needs this
 /// answer before the design, and not after.
-fn caps() -> Result<(), String> {
-    let backend = Backend::new().map_err(|e| e.to_string())?;
-    let (mut open, iface) = find_mtp(&backend, false)?;
+fn caps(node: Option<Node>) -> Result<(), String> {
+    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
+    let (mut open, iface) = find_mtp(&backend, node, false)?;
     if open.kernel_driver_active(iface.interface_number) {
         let _ = open.detach_kernel_driver(iface.interface_number);
     }
-    let channels = open
-        .open_mtp(&iface, BULK_BUFFER)
+    let device = open
+        .into_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let (mut s, _) = start_session(channels, &iface, 1)?;
+    let (mut s, _) = start_session(device, &iface, 1)?;
 
     let out = s
         .operation("GetDeviceInfo", op::GET_DEVICE_INFO, &[])
@@ -991,10 +996,26 @@ fn print_file_mode_names(indent: &str) {
     println!();
     println!("{indent}The name is not the same on each cellphone. These are the");
     println!("{indent}names the project has seen:");
-    println!("{indent}  Transferring Files / Android Auto");
-    println!("{indent}  File Transfer");
-    println!("{indent}  Transfer files");
+    for name in FILE_MODE_NAMES {
+        println!("{indent}  {name}");
+    }
 }
+
+/// The names the three test cellphones give to file transfer mode.
+///
+/// No name agrees across the three, so a name is an example and never an
+/// instruction. An earlier version wrote this list in two places.
+///
+/// ```text
+/// Samsung SM-S901U      Transferring Files / Android Auto
+/// Cyrus CS 24           File Transfer
+/// Motorola Moto G (5)   Transfer files
+/// ```
+const FILE_MODE_NAMES: [&str; 3] = [
+    "Transferring Files / Android Auto",
+    "File Transfer",
+    "Transfer files",
+];
 
 /// Reads a handle from the command line. The text is decimal or hexadecimal.
 fn parse_handle(s: &str) -> Option<u32> {
@@ -1011,9 +1032,9 @@ const SEARCH_LIMIT: usize = 60;
 ///
 /// The command writes the payload to the file as the payload arrives. The host
 /// does not hold the object in memory, so a large file needs no large memory.
-fn get(handle: Option<u32>) -> Result<(), String> {
-    let backend = Backend::new().map_err(|e| e.to_string())?;
-    let (mut open, iface) = find_mtp(&backend, false)?;
+fn get(node: Option<Node>, handle: Option<u32>) -> Result<(), String> {
+    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
+    let (mut open, iface) = find_mtp(&backend, node, false)?;
     if open.kernel_driver_active(iface.interface_number) {
         let _ = open.detach_kernel_driver(iface.interface_number);
     }
@@ -1035,10 +1056,10 @@ fn get(handle: Option<u32>) -> Result<(), String> {
         }
     }
 
-    let channels = open
-        .open_mtp(&iface, BULK_BUFFER)
+    let device = open
+        .into_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let (mut s, _) = start_session(channels, &iface, 1)?;
+    let (mut s, _) = start_session(device, &iface, 1)?;
     let w = wait_for_storage(&mut s)?;
     if w.ids.is_empty() {
         report_no_storage(&w);
@@ -1179,25 +1200,6 @@ fn get(handle: Option<u32>) -> Result<(), String> {
     Ok(())
 }
 
-/// Tells you if any device gives an MTP interface.
-fn mtp_present(backend: &Backend) -> bool {
-    for d in backend.devices() {
-        let mut open = match d.open(4) {
-            Ok(o) => o,
-            Err(_) => continue,
-        };
-        let raw = match open.config_descriptor_raw(TIMEOUT) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        if open.find_mtp_interface(TIMEOUT).is_ok() {
-            return true;
-        }
-        let _ = raw;
-    }
-    false
-}
-
 /// The count of attempts the host makes to read the storage list.
 const STORAGE_ATTEMPTS: u32 = 10;
 /// The wait between two attempts to read the storage list.
@@ -1287,15 +1289,15 @@ fn report_no_storage(w: &StorageWait) {
 /// A reset makes the device leave the bus and come back. The device is then in
 /// the state a user gets after a connect. The test needs no person to pull the
 /// cable.
-fn coldstart() -> Result<(), String> {
+fn coldstart(node: Option<Node>) -> Result<(), String> {
     println!("--- Cold start test ---");
     println!("The test resets the device, waits for the device to come back,");
     println!("and measures the time until the device reports a storage.");
     println!();
 
     {
-        let backend = Backend::new().map_err(|e| e.to_string())?;
-        let (mut open, _iface) = find_mtp(&backend, false)?;
+        let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
+        let (mut open, _iface) = find_mtp(&backend, node, false)?;
         println!();
         println!("  reset the device");
         open.reset().map_err(|e| format!("cannot reset: {e}"))?;
@@ -1310,8 +1312,8 @@ fn coldstart() -> Result<(), String> {
     // Step 1: wait for the device to leave.
     let mut left = None;
     for attempt in 1..=40 {
-        let backend = Backend::new().map_err(|e| e.to_string())?;
-        if mtp_present(&backend) {
+        let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
+        if discover::any(&backend, TIMEOUT) {
             std::thread::sleep(Duration::from_millis(100));
         } else {
             left = Some(attempt);
@@ -1329,8 +1331,8 @@ fn coldstart() -> Result<(), String> {
     // Step 2: wait for the device to return.
     let mut came_back = None;
     for _ in 1..=60 {
-        let backend = Backend::new().map_err(|e| e.to_string())?;
-        if mtp_present(&backend) {
+        let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
+        if discover::any(&backend, TIMEOUT) {
             came_back = Some(started.elapsed());
             break;
         }
@@ -1349,15 +1351,15 @@ fn coldstart() -> Result<(), String> {
         }
     }
 
-    let backend = Backend::new().map_err(|e| e.to_string())?;
-    let (mut open, iface) = find_mtp(&backend, true)?;
+    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
+    let (mut open, iface) = find_mtp(&backend, node, true)?;
     if open.kernel_driver_active(iface.interface_number) {
         let _ = open.detach_kernel_driver(iface.interface_number);
     }
-    let channels = open
-        .open_mtp(&iface, BULK_BUFFER)
+    let device = open
+        .into_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the endpoints: {e}"))?;
-    let (mut s, _) = start_session(channels, &iface, 1)?;
+    let (mut s, _) = start_session(device, &iface, 1)?;
 
     let w = wait_for_storage(&mut s)?;
     let _ = s.close_session();
