@@ -3,8 +3,15 @@
 FreeBSD ports hold four programs that mount an Android device over MTP. This
 document records what each one does on the test system.
 
-A project that repeats the work of another project wastes the time of a reader.
-This document therefore gives the measurement, and not an opinion.
+Each of these programs is a good program, and each one works on Linux. This
+document is not a judgment of the work of another person.
+
+The document exists for one reason. A reader can fairly ask why this project
+exists, because MTP over FUSE is not a new idea. The answer needs a
+measurement, and not an opinion.
+
+The author of this project used these programs over several years, and met the
+same trouble each time. The measurements below put a number on that experience.
 
 ## The test
 
@@ -76,22 +83,37 @@ then copied the 450 MB file with the correct sum.
 2. The host reads and drops the bytes the device still holds.
 3. The host closes a session that an earlier program left open.
 
-## What this project adds
+## One cause, and three programs
 
-A reader can fairly ask why this project exists, because MTP over FUSE is not a
-new idea.
+The three programs come from different people, and the three hold different
+code. Each one fails on FreeBSD, and each one reaches the telephone through
+`/usr/lib/libusb.so.3`.
 
-The answer is the transport. Each other program uses the `libusb-1.0`
-compatibility layer of FreeBSD. This project uses `libusb20`, which FreeBSD
-ships in the base system, and which gives a deadline that the caller controls.
+That file is the compatibility layer. The layer holds the defect in
+`docs/00-why.md`.
+
+A program that uses the layer cannot set a deadline for a transfer. The author
+of such a program writes correct code, and the code still stops.
+
+## The road this project took
+
+There are two roads:
+
+1. Repair the compatibility layer. The repair then helps every program on
+   FreeBSD.
+2. Do not use the layer.
+
+This project took the second road, and used `libusb20` from the base system.
+The choice is not a judgment of the first road, and the first road is still
+worth the work.
 
 The FUSE part of this project is not new. The transport is.
 
-## A fair note
+## A fair note about aft-mtp-mount
 
-`aft-mtp-mount` is a good program, and the program works on Linux. The fault
-above is a fault of the combination: that program, this operating system, and a
-large file.
+A reader who needs a listing today, or a small file, has a working answer in
+the ports tree. `aft-mtp-mount` does that work, and the program holds a
+complete MTP implementation.
 
-A reader who needs a listing and a small file today has a working answer in the
-ports tree. A reader who needs a large file does not.
+The fault above needs three things together: that program, this operating
+system, and a large file. Two of the three are not the work of the author.

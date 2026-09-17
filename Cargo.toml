@@ -7,7 +7,7 @@ version = "0.0.1"
 edition = "2021"
 rust-version = "1.82"
 license = "BSD-2-Clause"
-repository = "https://github.com/statorit/bsdroid"
+repository = "https://github.com/laidback01/bsdroid"
 
 [profile.release]
 overflow-checks = true

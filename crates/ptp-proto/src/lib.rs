@@ -235,6 +235,29 @@ impl<'a> Container<'a> {
     }
 }
 
+/// Writes a PTP string into a buffer.
+///
+/// The first byte holds the character count, and the count includes the
+/// terminator. The characters are UTF-16 little-endian. An empty string gives
+/// one byte of 0, and no characters.
+fn push_string(out: &mut Vec<u8>, s: &str) {
+    if s.is_empty() {
+        out.push(0);
+        return;
+    }
+    let units: Vec<u16> = s.encode_utf16().collect();
+
+    // The count byte holds the characters and the terminator. A name longer
+    // than 254 characters does not fit, so the function cuts the name.
+    let max = 254usize;
+    let take = core::cmp::min(units.len(), max);
+    out.push((take + 1) as u8);
+    for u in &units[..take] {
+        out.extend_from_slice(&u.to_le_bytes());
+    }
+    out.extend_from_slice(&0u16.to_le_bytes());
+}
+
 /// Builds a container for the wire.
 ///
 /// The function writes the header and then the payload. The length field
@@ -509,6 +532,59 @@ impl ObjectInfo {
     /// Tells you if the object is a folder.
     pub fn is_folder(&self) -> bool {
         self.object_format == format::ASSOCIATION
+    }
+
+    /// Builds an `ObjectInfo` dataset for `SendObjectInfo`.
+    ///
+    /// The host sends the dataset before the bytes of a file. The dataset
+    /// tells the device the name, the size and the folder.
+    ///
+    /// The size must be correct. A device reads exactly that count of bytes in
+    /// the next operation.
+    pub fn build_for_send(
+        storage_id: u32,
+        parent: u32,
+        name: &str,
+        size: u32,
+        is_folder: bool,
+    ) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64 + name.len() * 2);
+
+        out.extend_from_slice(&storage_id.to_le_bytes());
+
+        let format: u16 = if is_folder {
+            format::ASSOCIATION
+        } else {
+            format::UNDEFINED
+        };
+        out.extend_from_slice(&format.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // protection status
+        out.extend_from_slice(&size.to_le_bytes());
+
+        // The thumbnail fields, which a host does not set.
+        out.extend_from_slice(&0u16.to_le_bytes()); // thumb format
+        out.extend_from_slice(&0u32.to_le_bytes()); // thumb size
+        out.extend_from_slice(&0u32.to_le_bytes()); // thumb width
+        out.extend_from_slice(&0u32.to_le_bytes()); // thumb height
+
+        out.extend_from_slice(&0u32.to_le_bytes()); // image width
+        out.extend_from_slice(&0u32.to_le_bytes()); // image height
+        out.extend_from_slice(&0u32.to_le_bytes()); // image bit depth
+
+        out.extend_from_slice(&parent.to_le_bytes());
+
+        // A folder is an association, and a file is not.
+        let association: u16 = if is_folder { 1 } else { 0 };
+        out.extend_from_slice(&association.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // association description
+        out.extend_from_slice(&0u32.to_le_bytes()); // sequence number
+
+        push_string(&mut out, name);
+        push_string(&mut out, ""); // capture date
+        push_string(&mut out, ""); // modification date
+        push_string(&mut out, ""); // keywords
+
+        out
     }
 
     /// Reads an `ObjectInfo` dataset from the payload of a data container.

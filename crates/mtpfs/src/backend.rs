@@ -38,6 +38,9 @@ const BULK_BUFFER: u32 = 1024 * 1024;
 /// the end, so the next read almost always follows the last one.
 const READ_AHEAD: usize = 4 * 1024 * 1024;
 
+/// The count of bytes the host writes in one transfer.
+const WRITE_CHUNK: usize = 512 * 1024;
+
 /// The deadline for the first read of a drain, in milliseconds.
 const DRAIN_FIRST_MILLIS: u64 = 15;
 
@@ -60,6 +63,9 @@ const OP_GET_STORAGE_IDS: u16 = 0x1004;
 const OP_GET_OBJECT_HANDLES: u16 = 0x1007;
 const OP_GET_OBJECT_INFO: u16 = 0x1008;
 const OP_GET_DEVICE_INFO: u16 = 0x1001;
+const OP_SEND_OBJECT_INFO: u16 = 0x100c;
+const OP_SEND_OBJECT: u16 = 0x100d;
+const OP_DELETE_OBJECT: u16 = 0x100b;
 
 /// Response code for success.
 const RESP_OK: u16 = 0x2001;
@@ -390,6 +396,144 @@ impl Mtp {
         };
 
         self.operation("GetPartialObject", self.partial_read, &params)
+    }
+
+    /// Writes a new object to the device.
+    ///
+    /// MTP needs two operations. `SendObjectInfo` gives the name, the folder
+    /// and the size. `SendObject` gives the bytes.
+    ///
+    /// The size must be correct in the first operation, so a caller must hold
+    /// the whole object before the call.
+    ///
+    /// The function gives the handle the device assigns.
+    pub fn send_object(
+        &mut self,
+        parent: u32,
+        name: &str,
+        data: &[u8],
+        is_folder: bool,
+    ) -> Result<u32, Error> {
+        let info = ptp_proto::ObjectInfo::build_for_send(
+            self.storage,
+            parent,
+            name,
+            data.len() as u32,
+            is_folder,
+        );
+
+        // The parent of an object in the root is 0xffffffff for this
+        // operation, and 0 for a folder. The value is not the value that
+        // GetObjectHandles takes.
+        let parent_arg = if parent == ROOT { 0xffff_ffff } else { parent };
+
+        let (code, resp) = self.operation_with_data(
+            "SendObjectInfo",
+            OP_SEND_OBJECT_INFO,
+            &[self.storage, parent_arg],
+            &info,
+        )?;
+        if code != RESP_OK {
+            return Err(Error::Device {
+                step: "SendObjectInfo",
+                code,
+            });
+        }
+
+        // The device answers with the storage, the parent and the new handle.
+        let handle = resp
+            .get(2)
+            .copied()
+            .ok_or(Error::Device {
+                step: "SendObjectInfo",
+                code,
+            })?;
+
+        // A folder needs no second operation.
+        if is_folder {
+            self.cache = None;
+            return Ok(handle);
+        }
+
+        let (code, _) = self.operation_with_data("SendObject", OP_SEND_OBJECT, &[], data)?;
+        if code != RESP_OK {
+            return Err(Error::Device {
+                step: "SendObject",
+                code,
+            });
+        }
+        self.cache = None;
+        Ok(handle)
+    }
+
+    /// Removes an object from the device.
+    pub fn delete_object(&mut self, handle: u32) -> Result<(), Error> {
+        let (code, _) = self.operation_code("DeleteObject", OP_DELETE_OBJECT, &[handle, 0])?;
+        if code != RESP_OK {
+            return Err(Error::Device {
+                step: "DeleteObject",
+                code,
+            });
+        }
+        self.cache = None;
+        Ok(())
+    }
+
+    /// Does one operation that sends a data phase.
+    ///
+    /// The steps:
+    ///
+    /// 1. Send the command container.
+    /// 2. Send the data container, which holds the header and the payload.
+    /// 3. Read the response container.
+    ///
+    /// The function gives the response code and the parameters of the
+    /// response.
+    fn operation_with_data(
+        &mut self,
+        step: &'static str,
+        code: u16,
+        params: &[u32],
+        payload: &[u8],
+    ) -> Result<(u16, Vec<u32>), Error> {
+        let tid = self.transaction;
+        self.transaction = self.transaction.wrapping_add(1);
+
+        let command = ptp_proto::build_command(code, tid, params);
+        self.channels.write.write(&command, TIMEOUT)?;
+
+        // The data container holds the header and the payload. A large payload
+        // goes in parts, because one transfer has a limit.
+        let header = ptp_proto::build(ptp_proto::ContainerType::Data, code, tid, &[]);
+        let total = (ptp_proto::HEADER_LEN + payload.len()) as u32;
+
+        let mut first = header.clone();
+        first[0..4].copy_from_slice(&total.to_le_bytes());
+
+        // The first write holds the header and as much payload as fits.
+        let room = WRITE_CHUNK - ptp_proto::HEADER_LEN;
+        let take = core::cmp::min(room, payload.len());
+        first.extend_from_slice(&payload[..take]);
+        self.channels.write.write(&first, TIMEOUT)?;
+
+        let mut sent = take;
+        while sent < payload.len() {
+            let end = core::cmp::min(sent + WRITE_CHUNK, payload.len());
+            self.channels.write.write(&payload[sent..end], TIMEOUT)?;
+            sent = end;
+        }
+
+        // Read the response.
+        let mut buf = vec![0u8; READ_BUFFER];
+        let n = self.channels.read.read(&mut buf, TIMEOUT)?;
+        let c = Container::parse(&buf[..n])?;
+        if c.kind != ContainerType::Response {
+            return Err(Error::Device {
+                step,
+                code: c.code,
+            });
+        }
+        Ok((c.code, c.parameters()))
     }
 
     /// Sends `OpenSession`, and repairs a session an earlier program left.

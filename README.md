@@ -1,148 +1,118 @@
 # bsdroid
 
-Android device support for FreeBSD.
+Mount an Android telephone as a folder, on FreeBSD.
 
-## Status
+## Why this exists
 
-Early. The project builds the first layer. No tool is ready for use.
+A FreeBSD desktop does not get on well with a modern Android telephone. You
+connect the telephone, you try to mount it, and the mount stops. The mount
+point then gives an error for each command, and one CPU core runs at 100%.
 
-## The problem
+This project began with mild frustration at that, after several years of it.
 
-An Android phone does not mount reliably on FreeBSD. The available MTP
-filesystems stop and use 100% of one CPU core. The cause is a loop in the
-`libusb-1.0` compatibility layer. `docs/00-why.md` records the measurement and
-the cause.
-
-## The goal
-
-A FreeBSD user connects an Android phone and reads the files. The user does not
-change a setting on the phone. The user does not enable developer mode.
-
-MTP needs no setup on the phone, so MTP is the transport for the product.
-`adb` needs developer mode, so the project uses `adb` only as a test reference.
-
-## Is this not built already?
-
-MTP over FUSE is not a new idea. FreeBSD ports hold three other programs that
-do it. The test system ran each one against the same telephone:
-
-| Program         | Mounts | 290 KB | 8 MB | 450 MB |
-| --------------- | ------ | ------ | ---- | ------ |
-| `simple-mtpfs`  | no     | no     | no   | no     |
-| `jmtpfs`        | no     | no     | no   | no     |
-| `aft-mtp-mount` | yes    | yes    | yes  | no     |
-| this project    | yes    | yes    | yes  | yes    |
-
-Each other program uses the `libusb-1.0` compatibility layer of FreeBSD, and
-that layer holds the fault. The FUSE part of this project is not new. The
-transport is.
-
-`docs/09-the-other-tools.md` holds the measurements.
-
-## The approach
-
-The project does not use `libusb-1.0`. The project uses `libusb20`, which
-FreeBSD ships in the base system. `libusb20` gives a timeout that the caller
-controls.
-
-## Crates
-
-| Crate         | Purpose                                      | State           |
-| ------------- | -------------------------------------------- | --------------- |
-| `ptp-proto`   | PTP wire format. No I/O and no dependency.   | tests pass      |
-| `usb-freebsd` | USB transport over `libusb20`.               | tests pass      |
-| `mtpprobe`    | Reports what a device does, and where it stops. | works on three phones |
-| `mtpfs`       | Mounts a device as a folder. Read only.      | reads verified  |
-
-## mtpfs
+The author used the programs below over that time, and met the same trouble
+each time. On the day this project started, `simple-mtpfs` left a mount point
+in this state:
 
 ```
-cargo build
-./target/debug/mtpfs /path/to/a/folder
+d---------   0 root wheel  0 Dec 31  1969 phone
 ```
 
-The mount is read only. A read gives the same bytes as a copy over `adb`, and
-a test compares a SHA-256 sum.
+No command read the folder. No signal stopped the program.
 
-To stop the mount:
+### The state of things
+
+FreeBSD ports hold three other programs that mount a telephone over MTP. Each
+one ran against a Samsung SM-S901U on the same host, with the same files:
+
+| Program         | Mounts | Lists a folder | 290 KB | 8 MB | 450 MB |
+| --------------- | ------ | -------------- | ------ | ---- | ------ |
+| `simple-mtpfs`  | no     | no             | no     | no   | no     |
+| `jmtpfs`        | no     | no             | no     | no   | no     |
+| `aft-mtp-mount` | yes    | yes            | yes    | yes  | no     |
+
+These are good programs, and each one works on Linux. The fault is not in them.
+
+Each program reaches the telephone through `/usr/lib/libusb.so.3`. FreeBSD has
+no native `libusb-1.0`, so that file is a compatibility layer over the native
+USB library. The layer holds a defect. When a transfer stalls, the layer polls
+with no timeout, and the layer never gives control back. A program that uses
+the layer cannot set a deadline, and cannot recover.
+
+`docs/00-why.md` holds the measurement: 455262 system calls in 20 seconds, with
+106 useful transfers among them.
+
+### The choice this project made
+
+There are two roads. Repair the compatibility layer, or do not use the layer.
+
+This project does not use the layer. FreeBSD ships `libusb20` in the base
+system, which is the native USB library, and which gives a deadline that the
+caller controls. The USB code and the MTP code here are new.
+
+That is not a criticism of the other programs. A repair of the compatibility
+layer helps every program on FreeBSD, and the repair is still worth doing. This
+project took the other road.
+
+## What works now
+
+| Operation              | State |
+| ---------------------- | ----- |
+| Mount                  | yes   |
+| List a folder          | yes   |
+| Read a file            | yes   |
+| Write a new file       | yes   |
+| Make a folder          | yes   |
+| Remove a file          | yes   |
+| Remove a folder        | yes   |
+| Rename                 | no    |
+| Change a file in place | no    |
+
+A read gives the same bytes as a copy over `adb`. A test compares a SHA-256
+sum, for a file of 290 KB and for a file of 450 MB.
+
+## Build and use
 
 ```
-umount /path/to/a/folder
+pkg install fusefs-libs3
+cargo build --release
+./target/release/mtpfs /path/to/an/empty/folder
 ```
 
+Before you start:
 
-## mtpprobe
+1. Connect the telephone.
+2. Unlock the telephone.
+3. Put the telephone into file transfer mode.
 
-```
-cargo run --bin mtpprobe
-```
-
-The program finds an MTP device, reads the storage, and reports each step with
-a time. Every transfer has a 5 second deadline, so the program always stops.
-
-The program also sends the operation sequence that stops `simple-mtpfs` and
-`jmtpfs`. On a Samsung SM-S901U each step takes 3 milliseconds or less, and the
-program does not stop. `docs/00-why.md` gives the numbers.
-
-## Tests
+To stop:
 
 ```
-cargo test
+umount /path/to/an/empty/folder
 ```
 
-The tests need no phone. The test data comes from a real capture of a Samsung
-SM-S901U. `crates/ptp-proto/tests/fixtures/README.md` records the source.
+The project also holds `mtpprobe`, which reports what a telephone does, and
+where a transfer stops. Run `mtpprobe --help` for the commands.
 
 ## Test hardware
 
-The project needs reports from many devices. At present the project has three:
+Three telephones, from three makers, with two chip makers:
 
-| Item                     | Samsung SM-S901U | Motorola Moto G (5) | Cyrus CS 24    |
-| ------------------------ | ---------------- | ------------------- | -------------- |
-| Chip maker               | Qualcomm         | Qualcomm            | MediaTek       |
-| The name in the shop     | Galaxy S22       | Moto G (5)          | NUU B20        |
-| MTP interface class      | 0x06/0x01/0x01   | 0xff/0xff/0x00      | 0x06/0x01/0x01 |
-| The name of the interface | `MTP`           | `MTP`               | `MTP`          |
-| Interfaces in this mode  | 4                | 2                   | 1              |
-| An adb interface         | yes              | yes                 | no             |
-| Storage on attempt 1     | no               | yes                 | yes            |
-| Super speed capability   | yes              | no                  | no             |
-| Objects on the storage   | 2059             | 57                  | 8656           |
-| Rate, 64 KiB reads       | 32.1 MiB/s       | 28.2 MiB/s          | 39.4 MiB/s     |
-| One open and close cycle | 48 ms            | 46 ms               | not measured again |
-| Operations supported     | 35               | 43                  | not measured yet   |
-| A filesystem can read part of a file | yes  | yes                 | not measured yet   |
-| A filesystem can write   | yes              | yes                 | not measured yet   |
+| Telephone           | Sold as    | Chip     |
+| ------------------- | ---------- | -------- |
+| Samsung SM-S901U    | Galaxy S22 | Qualcomm |
+| Motorola Moto G (5) | Moto G5    | Qualcomm |
+| Cyrus CS 24         | NUU B20    | MediaTek |
 
-An earlier version of this table gave 23 ms for the Samsung and 270 ms for the
-Motorola. Those two numbers came from two versions of this project, and one
-version held a drain that cost 250 milliseconds. The numbers did not compare.
+The three do not agree about much. Two use the standard USB class for MTP, and
+one uses a vendor class. One waits before it reports a storage, and two do not.
+Each one gives a different name to the same USB mode.
 
-The two values above come from the same version, and the two devices agree. See
-`docs/06-the-reset-that-breaks.md`.
+Each disagreement broke a rule that came from one telephone. The files in
+`docs/` hold the measurement for each one.
 
-### What the three devices settle
-
-Two rules came from one device, and a second device broke each one:
-
-- The class of the MTP interface. Two devices use the standard class, and one
-  uses a vendor class. See `docs/05-finding-the-interface.md`.
-- The wait before a storage appears. One device waits, and two do not. See
-  `docs/01-cold-start.md`.
-
-One rule holds on all three devices, and the rule now has weight:
-
-- `GetObjectHandles` with 0x00000000 gives every object, and with 0xffffffff
-  gives the root folder. The counts are 2059 and 13, 57 and 11, 8656 and 14.
-  See `docs/03-object-handles.md`.
-
-The name of the interface is `MTP` on all three devices. The name holds across
-two chip makers, and across two classes.
-
-A fourth device is more use to this project than a hundred more runs on these
-three.
-
-### How to send a report
+A fourth telephone is more use to this project than a hundred more runs on
+these three:
 
 ```
 cargo build
@@ -152,37 +122,43 @@ sh tools/capture-device.sh <a name for your device>
 The script hides each file name. Read the file in `docs/captures` before you
 send the file.
 
-## Documentation language
+## How this was built
 
-The documentation uses Simplified Technical English (ASD-STE100). Many readers
-of this project read English as a second language.
+A person and Claude Code wrote this together, over one long session. The person
+supplied the telephones, the cables, the hands, and the questions that broke
+the wrong answers.
 
-A check enforces the rules. The check does not depend on the judgment of the
-writer:
+Several documents in `docs/` record a correction. The project measured one
+device, drew a rule, met a second device, and found the rule wrong. Some of the
+faults were in this project, and each document says so.
+
+## Documentation
+
+| File                               | Subject                                     |
+| ---------------------------------- | ------------------------------------------- |
+| `docs/00-why.md`                   | The defect in the compatibility layer       |
+| `docs/01-cold-start.md`            | A telephone that reports no storage at first |
+| `docs/02-device-states.md`         | What a USB mode changes, and what it does not |
+| `docs/03-object-handles.md`        | How a device lists the objects it holds     |
+| `docs/04-file-transfer.md`         | The copy of a file, and the rate            |
+| `docs/05-finding-the-interface.md` | Two ways a telephone gives MTP              |
+| `docs/06-the-reset-that-breaks.md` | A repair that breaks a working device       |
+| `docs/07-filesystem-design.md`     | The design of the filesystem                |
+| `docs/08-what-libmtp-knows.md`     | What the `libmtp` database already knew     |
+| `docs/09-the-other-tools.md`       | The measurements of the other programs      |
+
+The documentation uses Simplified Technical English (ASD-STE100), because many
+readers of this project read English as a second language.
+`tools/lint-docs.sh` checks the rules.
+
+## Tests
 
 ```
-git clone --depth 1 https://github.com/AminBlg/SimpleEnglish.git ../SimpleEnglish
-sh tools/lint-docs.sh
+cargo test
 ```
 
-The check reads every Markdown file. If a file holds a violation, the check
-fails. The linter comes from the SimpleEnglish project, under the MIT licence.
-This repository does not copy the linter.
-
-The check measures the mechanical rules:
-
-- sentence length
-- contraction
-- perfect tense
-- semicolon and em dash
-- Latin abbreviation
-- vague word
-- trailing condition
-
-The check does not measure the approved word list. ASD controls the
-distribution of the list, so no project can ship the list. A reader who owns
-the Issue 9 specification can make a local word list. The `tools/ste-dictionary`
-directory of the SimpleEnglish project shows how.
+The tests need no telephone. The test data comes from real captures, and
+`crates/ptp-proto/tests/fixtures/README.md` records the source of each one.
 
 ## Licence
 

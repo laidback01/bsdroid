@@ -21,6 +21,22 @@ mod sys;
 struct Fs {
     mtp: Mtp,
     tree: Tree,
+    /// The files a program is writing, by path.
+    ///
+    /// MTP needs the size of a file before the bytes. FUSE gives the bytes
+    /// with no size in advance. The host therefore keeps the bytes until the
+    /// program closes the file, and sends the file then.
+    pending: std::collections::BTreeMap<String, Pending>,
+}
+
+/// A file a program is writing.
+struct Pending {
+    /// The folder that holds the new file.
+    parent: u32,
+    /// The name of the new file.
+    name: String,
+    /// The bytes so far.
+    data: Vec<u8>,
 }
 
 /// The state, in a wrapper that the compiler accepts in a static.
@@ -38,9 +54,9 @@ unsafe impl Send for FsCell {}
 static FS: Mutex<FsCell> = Mutex::new(FsCell(None));
 
 /// The mode bits for a folder that a user can read and enter.
-const MODE_DIR: u32 = 0o040_555;
+const MODE_DIR: u32 = 0o040_755;
 /// The mode bits for a file that a user can read.
-const MODE_FILE: u32 = 0o100_444;
+const MODE_FILE: u32 = 0o100_644;
 
 /// The largest count of listings one path walk reads.
 ///
@@ -90,6 +106,7 @@ fn main() -> std::process::ExitCode {
     FS.lock().unwrap().0 = Some(Fs {
         mtp,
         tree: Tree::new(),
+        pending: std::collections::BTreeMap::new(),
     });
 
     // SAFETY: every field of the struct is an Option of a function pointer,
@@ -99,6 +116,13 @@ fn main() -> std::process::ExitCode {
     ops.readdir = Some(op_readdir);
     ops.open = Some(op_open);
     ops.read = Some(op_read);
+    ops.create = Some(op_create);
+    ops.write = Some(op_write);
+    ops.release = Some(op_release);
+    ops.unlink = Some(op_unlink);
+    ops.mkdir = Some(op_mkdir);
+    ops.rmdir = Some(op_rmdir);
+    ops.truncate = Some(op_truncate);
 
     // The mount runs in one thread. The option `-s` says so.
     let mut argv: Vec<CString> = Vec::new();
@@ -179,6 +203,20 @@ unsafe extern "C" fn op_getattr(
         Some(f) => f,
         None => return -libc_enoent(),
     };
+
+    // A file a program is writing is not on the device yet.
+    if let Some(p) = fs.pending.get(&path) {
+        let size = p.data.len() as u64;
+        // SAFETY: FUSE gives a buffer for one stat.
+        unsafe {
+            core::ptr::write_bytes(st, 0, 1);
+            (*st).st_mode = 0o100_644 as sys::mode_t;
+            (*st).st_nlink = 1;
+            (*st).st_size = size as sys::off_t;
+            (*st).st_blksize = 65536;
+        }
+        return 0;
+    }
 
     let handle = match resolve(fs, &path) {
         Some(h) => h,
@@ -286,16 +324,212 @@ unsafe extern "C" fn op_open(path: *const i8, fi: *mut sys::fuse_file_info) -> i
         _ => return -libc_eisdir(),
     }
 
-    // The mount is read only in this version.
     // SAFETY: FUSE gives a valid structure.
     if !fi.is_null() {
-        let flags = unsafe { (*fi).flags };
-        if flags & 0o3 != 0 {
-            return -libc_erofs();
-        }
         unsafe { (*fi).fh = u64::from(handle) };
     }
     0
+}
+
+/// Splits a path into the folder and the name.
+fn split_parent(path: &str) -> (String, String) {
+    match path.rfind('/') {
+        Some(0) => ("/".to_string(), path[1..].to_string()),
+        Some(i) => (path[..i].to_string(), path[i + 1..].to_string()),
+        None => ("/".to_string(), path.to_string()),
+    }
+}
+
+/// Makes a new file, and keeps the bytes until the program closes the file.
+unsafe extern "C" fn op_create(
+    path: *const i8,
+    _mode: sys::mode_t,
+    fi: *mut sys::fuse_file_info,
+) -> i32 {
+    let path = path_of(path);
+    let mut guard = FS.lock().unwrap();
+    let fs = match guard.0.as_mut() {
+        Some(f) => f,
+        None => return -libc_eio(),
+    };
+
+    let (dir, name) = split_parent(&path);
+    if name.is_empty() {
+        return -libc_eio();
+    }
+    let parent = match resolve(fs, &dir) {
+        Some(h) => h,
+        None => return -libc_enoent(),
+    };
+
+    fs.pending.insert(
+        path,
+        Pending {
+            parent,
+            name,
+            data: Vec::new(),
+        },
+    );
+    if !fi.is_null() {
+        unsafe { (*fi).fh = 0 };
+    }
+    0
+}
+
+/// Keeps the bytes of a write.
+unsafe extern "C" fn op_write(
+    path: *const i8,
+    buf: *const i8,
+    size: usize,
+    offset: sys::off_t,
+    _fi: *mut sys::fuse_file_info,
+) -> i32 {
+    let path = path_of(path);
+    let mut guard = FS.lock().unwrap();
+    let fs = match guard.0.as_mut() {
+        Some(f) => f,
+        None => return -libc_eio(),
+    };
+
+    let p = match fs.pending.get_mut(&path) {
+        Some(p) => p,
+        None => return -libc_erofs(),
+    };
+
+    let offset = offset as usize;
+    let end = offset + size;
+    if p.data.len() < end {
+        p.data.resize(end, 0);
+    }
+    // SAFETY: FUSE gives a buffer of `size` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(buf as *const u8, p.data[offset..].as_mut_ptr(), size) };
+    size as i32
+}
+
+/// Sends the file to the device when a program closes the file.
+unsafe extern "C" fn op_release(path: *const i8, _fi: *mut sys::fuse_file_info) -> i32 {
+    let path = path_of(path);
+    let mut guard = FS.lock().unwrap();
+    let fs = match guard.0.as_mut() {
+        Some(f) => f,
+        None => return 0,
+    };
+
+    let p = match fs.pending.remove(&path) {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    match fs.mtp.send_object(p.parent, &p.name, &p.data, false) {
+        Ok(_) => {
+            // The folder holds a new object, so the listing is old.
+            fs.tree.forget_listing(p.parent);
+            0
+        }
+        Err(e) => {
+            eprintln!("mtpfs: cannot write {path}: {e}");
+            -libc_eio()
+        }
+    }
+}
+
+/// Accepts a change of size for a file a program is writing.
+unsafe extern "C" fn op_truncate(
+    path: *const i8,
+    size: sys::off_t,
+    _fi: *mut sys::fuse_file_info,
+) -> i32 {
+    let path = path_of(path);
+    let mut guard = FS.lock().unwrap();
+    let fs = match guard.0.as_mut() {
+        Some(f) => f,
+        None => return -libc_eio(),
+    };
+    match fs.pending.get_mut(&path) {
+        Some(p) => {
+            p.data.resize(size as usize, 0);
+            0
+        }
+        // A file on the device does not change size in this version.
+        None => -libc_erofs(),
+    }
+}
+
+/// Removes a file.
+unsafe extern "C" fn op_unlink(path: *const i8) -> i32 {
+    remove(path, false)
+}
+
+/// Removes a folder.
+unsafe extern "C" fn op_rmdir(path: *const i8) -> i32 {
+    remove(path, true)
+}
+
+/// Removes an object, and checks the kind first.
+fn remove(path: *const i8, want_dir: bool) -> i32 {
+    let path = path_of(path);
+    let mut guard = FS.lock().unwrap();
+    let fs = match guard.0.as_mut() {
+        Some(f) => f,
+        None => return -libc_eio(),
+    };
+
+    let handle = match resolve(fs, &path) {
+        Some(h) => h,
+        None => return -libc_enoent(),
+    };
+    if handle == ROOT {
+        return -libc_eio();
+    }
+
+    let (is_dir, parent) = match fs.tree.get(handle) {
+        Some(e) => (e.is_dir, e.parent),
+        None => return -libc_enoent(),
+    };
+    if is_dir != want_dir {
+        return if want_dir { -libc_enotdir() } else { -libc_eisdir() };
+    }
+
+    match fs.mtp.delete_object(handle) {
+        Ok(()) => {
+            fs.tree.forget_listing(parent);
+            0
+        }
+        Err(e) => {
+            eprintln!("mtpfs: cannot remove {path}: {e}");
+            -libc_eio()
+        }
+    }
+}
+
+/// Makes a folder.
+unsafe extern "C" fn op_mkdir(path: *const i8, _mode: sys::mode_t) -> i32 {
+    let path = path_of(path);
+    let mut guard = FS.lock().unwrap();
+    let fs = match guard.0.as_mut() {
+        Some(f) => f,
+        None => return -libc_eio(),
+    };
+
+    let (dir, name) = split_parent(&path);
+    if name.is_empty() {
+        return -libc_eio();
+    }
+    let parent = match resolve(fs, &dir) {
+        Some(h) => h,
+        None => return -libc_enoent(),
+    };
+
+    match fs.mtp.send_object(parent, &name, &[], true) {
+        Ok(_) => {
+            fs.tree.forget_listing(parent);
+            0
+        }
+        Err(e) => {
+            eprintln!("mtpfs: cannot make the folder {path}: {e}");
+            -libc_eio()
+        }
+    }
 }
 
 /// Reads part of a file.
@@ -363,4 +597,7 @@ fn libc_eisdir() -> i32 {
 }
 fn libc_erofs() -> i32 {
     30
+}
+fn libc_enotdir() -> i32 {
+    20
 }

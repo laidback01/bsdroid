@@ -368,3 +368,77 @@ fn a_huge_operation_count_does_not_reserve_memory() {
     let got = ptp_proto::DeviceInfo::parse(&bytes);
     assert!(got.is_err(), "got {got:?}");
 }
+
+// --- Building an ObjectInfo to send a file ---
+
+/// The builder and the parser must agree. The test builds a dataset, parses
+/// the dataset, and compares each field.
+#[test]
+fn an_object_info_survives_a_round_trip() {
+    let built =
+        ptp_proto::ObjectInfo::build_for_send(0x0001_0001, 0x10, "holiday.jpg", 12345, false);
+    let back = ptp_proto::ObjectInfo::parse(&built).expect("the builder writes a valid dataset");
+
+    assert_eq!(back.storage_id, 0x0001_0001);
+    assert_eq!(back.parent_object, 0x10);
+    assert_eq!(back.filename, "holiday.jpg");
+    assert_eq!(back.compressed_size, 12345);
+    assert!(!back.is_folder());
+    assert_eq!(back.association_type, 0);
+}
+
+#[test]
+fn a_folder_round_trips_as_a_folder() {
+    let built = ptp_proto::ObjectInfo::build_for_send(1, 0, "NewFolder", 0, true);
+    let back = ptp_proto::ObjectInfo::parse(&built).unwrap();
+
+    assert!(back.is_folder());
+    assert_eq!(back.object_format, ptp_proto::format::ASSOCIATION);
+    assert_eq!(back.association_type, 1);
+    assert_eq!(back.filename, "NewFolder");
+    assert_eq!(back.compressed_size, 0);
+}
+
+/// A name outside ASCII must survive. The wire format holds UTF-16.
+#[test]
+fn a_name_with_other_letters_survives() {
+    for name in ["résumé.txt", "日本語.jpg", "Ünïcödé", "a b c.txt"] {
+        let built = ptp_proto::ObjectInfo::build_for_send(1, 0, name, 1, false);
+        let back = ptp_proto::ObjectInfo::parse(&built).unwrap();
+        assert_eq!(back.filename, name, "name {name}");
+    }
+}
+
+/// The dataset the builder writes must have the shape the parser of a real
+/// capture expects. The test compares the field offsets with the fixture.
+#[test]
+fn the_built_dataset_has_the_same_shape_as_a_real_one() {
+    // The real StorageInfo fixture is a different dataset, so the test uses
+    // the real ObjectInfo the device sent for a file, through the parser.
+    let built = ptp_proto::ObjectInfo::build_for_send(0x0001_0001, 4, "a.jpg", 1000, false);
+
+    // The first four bytes hold the storage, little-endian.
+    assert_eq!(&built[0..4], &0x0001_0001u32.to_le_bytes());
+    // The next two hold the format.
+    assert_eq!(&built[4..6], &ptp_proto::format::UNDEFINED.to_le_bytes());
+    // The size sits at offset 8.
+    assert_eq!(&built[8..12], &1000u32.to_le_bytes());
+    // The parent sits after the thumbnail and image fields.
+    assert_eq!(&built[38..42], &4u32.to_le_bytes());
+}
+
+#[test]
+fn an_empty_name_gives_one_zero_byte() {
+    let built = ptp_proto::ObjectInfo::build_for_send(1, 0, "", 0, false);
+    let back = ptp_proto::ObjectInfo::parse(&built).unwrap();
+    assert_eq!(back.filename, "");
+}
+
+/// A name that is too long for the wire format must not make a bad dataset.
+#[test]
+fn a_very_long_name_still_gives_a_valid_dataset() {
+    let long = "a".repeat(400);
+    let built = ptp_proto::ObjectInfo::build_for_send(1, 0, &long, 0, false);
+    let back = ptp_proto::ObjectInfo::parse(&built).expect("the dataset must parse");
+    assert_eq!(back.filename.len(), 254, "the builder cuts the name");
+}
