@@ -127,6 +127,62 @@ reset, so a reset is not the default.
 
 The two answers agree, and the two answers come from different work.
 
+## Does this project need the database?
+
+The database covers 1529 devices, and this project tested three. A fair
+question follows: does this project work for a person with a different device?
+
+### The count is smaller than it looks
+
+Of the 1529 entries, 833 carry one flag group: `DEVICE_FLAGS_ANDROID_BUGS`.
+The group holds six flags, and each of the 833 Android entries gets the same
+six.
+
+The database is therefore not 1529 different faults. For an Android device, the
+database holds one rule, and the rule covers most entries. The other entries
+cover a music player from an earlier time.
+
+### The six flags, and what this project does
+
+| The flag                              | What this project does            |
+| ------------------------------------- | --------------------------------- |
+| `DEVICE_FLAG_BROKEN_MTPGETOBJPROPLIST` | The project does not use the operation |
+| `DEVICE_FLAG_BROKEN_SET_OBJECT_PROPLIST` | The project does not use the operation |
+| `DEVICE_FLAG_BROKEN_SEND_OBJECT_PROPLIST` | The project does not use the operation |
+| `DEVICE_FLAG_UNLOAD_DRIVER`           | The project takes the interface from the kernel, for each device |
+| `DEVICE_FLAG_LONG_TIMEOUT`            | The deadline is 10 seconds, for each device |
+| `DEVICE_FLAG_FORCE_RESET_ON_CLOSE`    | The project sends no reset, for each device |
+
+Each row needs no device table. The project either avoids the operation, or
+does the safe thing for every device.
+
+The Samsung offset fault is the same. The workaround asks for one byte less at
+the end of a file, and the workaround costs nothing on a device with no fault.
+The project therefore applies the workaround to each device.
+
+### Why the project does not link libmtp
+
+Two reasons.
+
+`libmtp` reaches a device through `libusb-1.0`. That layer holds the defect in
+`docs/00-why.md`. A link to `libmtp` brings the defect back, and the defect is
+the reason for this project.
+
+`libmtp` is under the LGPL, version 2.1. This project is under the BSD licence,
+with 2 clauses. A copy of the device table into this project needs the
+agreement of many authors over many years.
+
+### Where the risk really is
+
+The risk is not a device quirk. The risk is the search for the interface.
+
+Two of the three test devices use the standard USB class, and one uses a vendor
+class with the name `MTP`. A fourth device can use a third shape, and this
+project then finds nothing.
+
+A report from a new device is worth more to this project than a table of
+flags. `BSDROID_DEBUG=1 mtpprobe probe` prints what a report needs.
+
 ## What this means for the project
 
 Read the database. The database holds the work of many people over many years,

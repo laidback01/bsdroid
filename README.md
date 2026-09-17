@@ -88,6 +88,31 @@ $ nm -u target/release/mtpfs | grep 'U libusb_' | grep -v libusb20
 
 Fifteen calls to the native interface. None to the compatibility layer.
 
+### Then how does this work for a device I do not own?
+
+`libmtp` holds a table of 1529 devices, and a reader can fairly ask whether
+this project needs the table.
+
+Of the 1529 entries, 833 are Android, and each of the 833 carries the same six
+flags. The table is therefore one rule for an Android device, and not 833
+different faults.
+
+This project does the safe thing for each device, in place of a table:
+
+- The project does not use the three operations that the flags call broken.
+- The project takes the interface from the kernel, for each device.
+- The project sends no USB reset, because a reset breaks some devices.
+- The project works around the Samsung read fault for each device, because the
+  workaround costs nothing on a device with no fault.
+
+A link to `libmtp` also brings back `libusb-1.0`, and that layer holds the
+defect this project exists to avoid.
+
+The real risk is not a device quirk. The risk is the search for the MTP
+interface, which two of three test devices do one way and the third does
+another. A report from a device this project does not find is the most useful
+thing you can send. See `docs/08-what-libmtp-knows.md`.
+
 ## What works now
 
 | Operation              | State |
