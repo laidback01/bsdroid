@@ -384,9 +384,6 @@ Three cellphones, and each one reads and writes:
 Three makers, two chip makers, and three versions of Android that are eight
 years apart.
 
-Three makers, two chip makers, and three versions of Android that are eight
-years apart.
-
 ### How this project finds a device
 
 A cellphone gives MTP in one of two shapes, and the three above give both:
