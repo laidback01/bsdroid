@@ -253,17 +253,26 @@ statement.
 
 ## The name of a mode is not the same on each telephone
 
-| Mode                    | Samsung SM-S901U      | Cyrus CS 24        |
-| ----------------------- | --------------------- | ------------------ |
-| MTP                     | `File transfer`       | `File Transfer`    |
-| PTP                     | `Transferring images` | `PTP`              |
-| No data                 | `Charging only`       | `No data transfer` |
+| Mode        | Samsung SM-S901U                    | Cyrus CS 24        |
+| ----------- | ----------------------------------- | ------------------ |
+| MTP         | `Transferring Files / Android Auto` | `File Transfer`    |
+| Tethering   | `USB tethering`                     | `USB Tethering`    |
+| MIDI        | `MIDI`                              | `MIDI`             |
+| PTP         | `Transferring Images`               | `PTP`              |
+| No data     | `Charging phone only`               | `No data transfer` |
 
 Every mode charges the telephone. The name of a mode describes the data, and
 not the power.
 
-A message to a user must give both names. A user who looks for `Charging only`
-on a Cyrus CS 24 finds nothing.
+Two names of five agree. The name for MTP does not agree, and the name for MTP
+is the name a user needs.
+
+An earlier version of this document gave `File transfer` and `Charging only`
+for the Samsung. Both names were wrong, and the tool told a user to look for an
+option that the telephone does not hold.
+
+A message must therefore give each known name. `print_file_mode_names` in
+`mtpprobe` holds the list.
 
 ## What this means for a fault report
 

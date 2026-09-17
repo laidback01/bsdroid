@@ -336,6 +336,31 @@ impl<'a> Reader<'a> {
         String::from_utf16(&units).map_err(|_| ParseError::BadString { field })
     }
 
+    /// Reads a PTP array of `u16`.
+    fn read_u16_array(&mut self, field: &'static str) -> Result<Vec<u16>, ParseError> {
+        let count = self.read_u32(field)? as usize;
+
+        // Check the count against the buffer before the allocation.
+        let need = count.checked_mul(2).ok_or(ParseError::Truncated {
+            field,
+            need: usize::MAX,
+            got: self.remaining(),
+        })?;
+        if self.remaining() < need {
+            return Err(ParseError::Truncated {
+                field,
+                need,
+                got: self.remaining(),
+            });
+        }
+
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            out.push(self.read_u16(field)?);
+        }
+        Ok(out)
+    }
+
     /// Reads a PTP array of `u32`.
     fn read_u32_array(&mut self, field: &'static str) -> Result<Vec<u32>, ParseError> {
         let count = self.read_u32(field)? as usize;
@@ -533,6 +558,168 @@ impl ObjectInfo {
             filename,
             capture_date,
             modification_date,
+        })
+    }
+}
+
+/// Operation codes that change what a filesystem can do.
+///
+/// A device does not support every operation. `GetDeviceInfo` gives the list,
+/// and the list decides the design of a filesystem.
+pub mod op {
+    /// Reads part of an object. A filesystem needs this operation, because a
+    /// read asks for an offset and a length.
+    pub const GET_PARTIAL_OBJECT: u16 = 0x101b;
+    /// Reads part of an object, with a 64 bit offset. Android adds this one.
+    pub const GET_PARTIAL_OBJECT_64: u16 = 0x95c1;
+    /// Writes part of an object, with a 64 bit offset.
+    pub const SEND_PARTIAL_OBJECT: u16 = 0x95c2;
+    /// Announces an object the host is about to send.
+    pub const SEND_OBJECT_INFO: u16 = 0x100c;
+    /// Sends the bytes of an object.
+    pub const SEND_OBJECT: u16 = 0x100d;
+    /// Removes an object.
+    pub const DELETE_OBJECT: u16 = 0x100b;
+    /// Moves an object to another folder.
+    pub const MOVE_OBJECT: u16 = 0x1019;
+    /// Copies an object.
+    pub const COPY_OBJECT: u16 = 0x101a;
+    /// Reads many properties of many objects in one operation. A folder list
+    /// is fast with this operation, and slow without it.
+    pub const GET_OBJECT_PROP_LIST: u16 = 0x9805;
+    /// Lists the properties an object format supports.
+    pub const GET_OBJECT_PROPS_SUPPORTED: u16 = 0x9801;
+    /// Changes one property of one object. A rename needs this operation.
+    pub const SET_OBJECT_PROP_VALUE: u16 = 0x9804;
+    /// Changes the size of an object.
+    pub const TRUNCATE_OBJECT: u16 = 0x101c;
+    /// Starts a write that has no size in advance.
+    pub const BEGIN_EDIT_OBJECT: u16 = 0x95c4;
+
+    /// Gives a name for an operation code.
+    pub fn name(code: u16) -> &'static str {
+        match code {
+            0x1001 => "GetDeviceInfo",
+            0x1002 => "OpenSession",
+            0x1003 => "CloseSession",
+            0x1004 => "GetStorageIDs",
+            0x1005 => "GetStorageInfo",
+            0x1006 => "GetNumObjects",
+            0x1007 => "GetObjectHandles",
+            0x1008 => "GetObjectInfo",
+            0x1009 => "GetObject",
+            0x100a => "GetThumb",
+            0x100b => "DeleteObject",
+            0x100c => "SendObjectInfo",
+            0x100d => "SendObject",
+            0x1014 => "GetDevicePropDesc",
+            0x1015 => "GetDevicePropValue",
+            0x1016 => "SetDevicePropValue",
+            0x1019 => "MoveObject",
+            0x101a => "CopyObject",
+            0x101b => "GetPartialObject",
+            0x101c => "TruncateObject",
+            0x9801 => "GetObjectPropsSupported",
+            0x9802 => "GetObjectPropDesc",
+            0x9803 => "GetObjectPropValue",
+            0x9804 => "SetObjectPropValue",
+            0x9805 => "GetObjectPropList",
+            0x9806 => "SetObjectPropList",
+            0x9808 => "SendObjectPropList",
+            0x9810 => "GetObjectReferences",
+            0x9811 => "SetObjectReferences",
+            0x95c1 => "GetPartialObject64",
+            0x95c2 => "SendPartialObject",
+            0x95c3 => "TruncateObject64",
+            0x95c4 => "BeginEditObject",
+            0x95c5 => "EndEditObject",
+            _ => "unknown",
+        }
+    }
+}
+
+/// What a device says about itself.
+///
+/// `GetDeviceInfo` answers with this dataset. The list of operations decides
+/// what a filesystem on top of the device can do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// The version of the standard the device follows, times 100.
+    pub standard_version: u16,
+    /// The vendor that defines the extra operations.
+    pub vendor_extension_id: u32,
+    /// The version of the vendor extension, times 100.
+    pub vendor_extension_version: u16,
+    /// A description of the vendor extension.
+    pub vendor_extension_desc: String,
+    /// The operations the device supports.
+    pub operations_supported: Vec<u16>,
+    /// The events the device sends.
+    pub events_supported: Vec<u16>,
+    /// The device properties the device holds.
+    pub device_properties_supported: Vec<u16>,
+    /// The formats the device can make.
+    pub capture_formats: Vec<u16>,
+    /// The formats the device holds.
+    pub image_formats: Vec<u16>,
+    pub manufacturer: String,
+    pub model: String,
+    pub device_version: String,
+    pub serial_number: String,
+}
+
+impl DeviceInfo {
+    /// Tells you if the device supports an operation.
+    pub fn supports(&self, code: u16) -> bool {
+        self.operations_supported.contains(&code)
+    }
+
+    /// Tells you if the host can read part of an object.
+    ///
+    /// A filesystem needs this answer. A read asks for an offset and a length,
+    /// and `GetObject` gives the whole object. A device without a partial read
+    /// makes the host read a whole file for each read of one byte.
+    pub fn can_read_part(&self) -> bool {
+        self.supports(op::GET_PARTIAL_OBJECT) || self.supports(op::GET_PARTIAL_OBJECT_64)
+    }
+
+    /// Tells you if the host can write a new object.
+    pub fn can_write(&self) -> bool {
+        self.supports(op::SEND_OBJECT_INFO) && self.supports(op::SEND_OBJECT)
+    }
+
+    /// Tells you if the host can remove an object.
+    pub fn can_delete(&self) -> bool {
+        self.supports(op::DELETE_OBJECT)
+    }
+
+    /// Tells you if the host can read a folder in one operation.
+    pub fn has_fast_listing(&self) -> bool {
+        self.supports(op::GET_OBJECT_PROP_LIST)
+    }
+
+    /// Reads a `DeviceInfo` dataset from the payload of a data container.
+    pub fn parse(payload: &[u8]) -> Result<Self, ParseError> {
+        let mut r = Reader::new(payload);
+        Ok(Self {
+            standard_version: r.read_u16("standard_version")?,
+            vendor_extension_id: r.read_u32("vendor_extension_id")?,
+            vendor_extension_version: r.read_u16("vendor_extension_version")?,
+            vendor_extension_desc: r.read_string("vendor_extension_desc")?,
+            // The functional mode is not useful here, and the field must still
+            // move the cursor.
+            operations_supported: {
+                let _mode = r.read_u16("functional_mode")?;
+                r.read_u16_array("operations_supported")?
+            },
+            events_supported: r.read_u16_array("events_supported")?,
+            device_properties_supported: r.read_u16_array("device_properties_supported")?,
+            capture_formats: r.read_u16_array("capture_formats")?,
+            image_formats: r.read_u16_array("image_formats")?,
+            manufacturer: r.read_string("manufacturer").unwrap_or_default(),
+            model: r.read_string("model").unwrap_or_default(),
+            device_version: r.read_string("device_version").unwrap_or_default(),
+            serial_number: r.read_string("serial_number").unwrap_or_default(),
         })
     }
 }

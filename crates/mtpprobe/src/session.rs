@@ -14,6 +14,7 @@ use usb_freebsd::device::{MtpChannels, UsbError};
 ///
 /// The list holds only the codes the probe sends. A code goes in this list
 /// when a step uses the code, and not before.
+pub const OP_GET_DEVICE_INFO: u16 = 0x1001;
 pub const OP_OPEN_SESSION: u16 = 0x1002;
 pub const OP_CLOSE_SESSION: u16 = 0x1003;
 pub const OP_GET_STORAGE_IDS: u16 = 0x1004;
@@ -526,10 +527,12 @@ fn report_wedged_service() {
     println!("    If the request does not help, restart the MTP service on the");
     println!("    phone:");
     println!("      1. Open the USB notification.");
-    println!("      2. Choose the mode that carries no data. A phone names the");
-    println!("         mode Charging only, or No data transfer.");
-    println!("      3. Choose File transfer again. A phone names the mode File");
-    println!("         transfer, or Transferring files.");
+    println!("      2. Choose the mode that carries no data. A telephone names");
+    println!("         the mode `Charging phone only`, or `No data transfer`,");
+    println!("         or `Charging only`.");
+    println!("      3. Choose the mode that carries files again. A telephone");
+    println!("         names the mode `Transferring Files / Android Auto`, or");
+    println!("         `File Transfer`, or `MTP`.");
     println!();
     println!("    A restart of the phone also works, and takes longer.");
 }

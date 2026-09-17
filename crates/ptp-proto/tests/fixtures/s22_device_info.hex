@@ -1,0 +1,65 @@
+# PTP DeviceInfo dataset, Samsung SM-S901U (Galaxy S22).
+#
+# Source command:
+#   BSDROID_DEBUG=1 mtpprobe caps
+#
+# The dataset is the payload of the data phase of GetDeviceInfo, operation
+# 0x1001. The dataset holds 457 bytes.
+#
+# The device supports 35 operations, and the list holds every operation a
+# filesystem needs:
+#
+#   GetPartialObject     0x101b   read part of a file
+#   GetPartialObject64   0x95c1   read part of a file, 64 bit offset
+#   SendObjectInfo       0x100c   announce a new file
+#   SendObject           0x100d   write a new file
+#   SendPartialObject    0x95c2   write part of a file
+#   DeleteObject         0x100b   remove a file
+#   MoveObject           0x1019   move a file
+#   CopyObject           0x101a   copy a file
+#   SetObjectPropValue   0x9804   rename a file
+#   GetObjectPropList    0x9805   read a folder in one operation
+#   TruncateObject64     0x95c3   change the size of a file
+#   BeginEditObject      0x95c4   change a file in place
+#
+# A read and write filesystem is therefore possible on this device.
+#
+# The first fields:
+#   6400        StandardVersion = 100, which is version 1.00
+#   06000000    VendorExtensionID = 6, which is Microsoft MTP
+#   6400        VendorExtensionVersion = 100
+#   48          a string of 72 characters, the vendor extension description
+#
+# After the description:
+#   0000        FunctionalMode = 0
+#   23000000    OperationsSupported holds 0x23 = 35 codes
+
+64 00 06 00 00 00 64 00  48 6d 00 69 00 63 00 72
+00 6f 00 73 00 6f 00 66  00 74 00 2e 00 63 00 6f
+00 6d 00 3a 00 20 00 31  00 2e 00 30 00 3b 00 20
+00 73 00 61 00 6d 00 73  00 75 00 6e 00 67 00 2e
+00 63 00 6f 00 6d 00 2f  00 6b 00 69 00 65 00 73
+00 3a 00 20 00 36 00 2e  00 30 00 3b 00 20 00 73
+00 61 00 6d 00 73 00 75  00 6e 00 67 00 2e 00 63
+00 6f 00 6d 00 2f 00 64  00 65 00 76 00 69 00 63
+00 65 00 73 00 74 00 61  00 74 00 75 00 73 00 3a
+00 20 00 30 00 3b 00 00  00 00 00 23 00 00 00 01
+10 02 10 03 10 04 10 05  10 06 10 07 10 08 10 09
+10 0a 10 0b 10 0c 10 0d  10 10 10 14 10 15 10 16
+10 17 10 19 10 1a 10 1b  10 01 98 02 98 03 98 04
+98 05 98 11 98 c1 95 c2  95 c3 95 c4 95 c5 95 01
+95 02 95 03 95 06 00 00  00 02 40 03 40 04 40 05
+40 06 40 07 40 06 00 00  00 01 d4 02 d4 03 50 01
+50 07 d4 06 d4 00 00 00  00 1c 00 00 00 00 30 01
+30 04 30 05 30 08 30 09  30 0b 30 01 38 02 38 04
+38 07 38 08 38 0b 38 0d  38 01 b9 02 b9 03 b9 82
+b9 83 b9 84 b9 05 ba 10  ba 11 ba 14 ba 82 ba 06
+b9 11 38 12 38 08 73 00  61 00 6d 00 73 00 75 00
+6e 00 67 00 00 00 09 53  00 4d 00 2d 00 53 00 39
+00 30 00 31 00 55 00 00  00 0e 53 00 39 00 30 00
+31 00 55 00 53 00 51 00  53 00 41 00 47 00 5a 00
+48 00 33 00 00 00 21 34  00 30 00 45 00 44 00 39
+00 36 00 46 00 43 00 30  00 36 00 30 00 44 00 38
+00 42 00 30 00 41 00 43  00 45 00 30 00 37 00 41
+00 35 00 34 00 41 00 31  00 31 00 41 00 30 00 33
+00 38 00 31 00 41 00 00  00

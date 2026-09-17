@@ -92,6 +92,10 @@ out="$out_dir/$name.txt"
     adb shell getprop sys.usb.config 2>/dev/null | tail -1 || echo "(no adb)"
     echo
 
+    echo "## mtpprobe caps"
+    "$probe" caps 2>&1 || true
+    echo
+
     echo "## mtpprobe probe"
     "$probe" probe 2>&1 || true
     echo

@@ -11,7 +11,7 @@ mod session;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use ptp_proto::{ObjectInfo, StorageInfo};
+use ptp_proto::{op, DeviceInfo, ObjectInfo, StorageInfo};
 use usb_freebsd::descriptor::{ConfigDescriptor, MtpInterface};
 use usb_freebsd::device::{Backend, LinkSpeed, OpenDevice};
 
@@ -46,6 +46,7 @@ fn main() -> ExitCode {
         Some("objects") => objects(),
         Some("get") => get(args.get(1).and_then(|s| parse_handle(s))),
         Some("bench") => bench(),
+        Some("caps") => caps(),
         Some("--help") | Some("-h") => {
             usage();
             return ExitCode::SUCCESS;
@@ -79,6 +80,7 @@ fn usage() {
     println!("  mtpprobe objects        Count the objects, and read the root folder.");
     println!("  mtpprobe get [handle]   Copy one object to the current folder.");
     println!("  mtpprobe bench          Measure the rate of the USB link.");
+    println!("  mtpprobe caps           List what the device can do.");
     println!();
     println!("The get command takes a handle in decimal or in hexadecimal, such");
     println!("as 0x1a. The command takes the smallest file if you give no handle.");
@@ -214,10 +216,12 @@ fn no_mtp_message(backend: &Backend) -> String {
     let mut m = String::from("an Android device is connected, and the device gives no MTP\n");
     m.push_str("  interface. The device shows the adb interface, so the device is\n");
     m.push_str("  awake and the cable carries data.\n\n");
-    m.push_str("  The device is not in file transfer mode. On the phone:\n");
+    m.push_str("  The device does not carry files. On the telephone:\n");
     m.push_str("    1. Open the notification area.\n");
     m.push_str("    2. Find the USB notification.\n");
-    m.push_str("    3. Choose File transfer.\n\n");
+    m.push_str("    3. Choose the mode that carries files. A telephone names\n");
+    m.push_str("       the mode `Transferring Files / Android Auto`, or\n");
+    m.push_str("       `File Transfer`, or `Transfer files`, or `MTP`.\n\n");
     for d in &android_without_mtp {
         m.push_str(&format!("  device: {d}\n"));
     }
@@ -853,6 +857,117 @@ fn human(bytes: usize) -> String {
     }
 }
 
+/// Lists what the device can do.
+///
+/// `GetDeviceInfo` gives the operations a device supports. The list decides
+/// what a filesystem on top of the device can do, so a filesystem needs this
+/// answer before the design, and not after.
+fn caps() -> Result<(), String> {
+    let backend = Backend::new().map_err(|e| e.to_string())?;
+    let (mut open, iface) = find_mtp(&backend, false)?;
+    if open.kernel_driver_active(iface.interface_number) {
+        let _ = open.detach_kernel_driver(iface.interface_number);
+    }
+    let channels = open
+        .open_mtp(&iface, BULK_BUFFER)
+        .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
+    let mut s = Session::new(channels, TIMEOUT);
+    s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
+
+    let out = s
+        .operation("GetDeviceInfo", session::OP_GET_DEVICE_INFO, &[])
+        .map_err(|e| format!("{e}"))?;
+    // BSDROID_DEBUG prints the bytes. A fault report needs the bytes, and a
+    // test fixture needs the bytes.
+    if std::env::var("BSDROID_DEBUG").is_ok() {
+        println!();
+        println!("--- The raw dataset, {} bytes ---", out.data.len());
+        for (n, chunk) in out.data.chunks(16).enumerate() {
+            let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+            println!("    {:04x}  {}", n * 16, hex.join(" "));
+        }
+    }
+
+    let info = DeviceInfo::parse(&out.data).map_err(|e| format!("{e}"))?;
+
+    println!();
+    println!("--- The device ---");
+    println!("    manufacturer:  {}", info.manufacturer);
+    println!("    model:         {}", info.model);
+    println!("    version:       {}", info.device_version);
+    println!(
+        "    standard:      {}.{}",
+        info.standard_version / 100,
+        info.standard_version % 100
+    );
+    println!("    vendor extension: {}", info.vendor_extension_desc);
+
+    println!();
+    println!("--- What a filesystem needs ---");
+    let rows: [(&str, bool, &str); 4] = [
+        (
+            "read part of a file",
+            info.can_read_part(),
+            "a read asks for an offset, and GetObject gives the whole file",
+        ),
+        (
+            "write a new file",
+            info.can_write(),
+            "SendObjectInfo and SendObject",
+        ),
+        ("remove a file", info.can_delete(), "DeleteObject"),
+        (
+            "read a folder fast",
+            info.has_fast_listing(),
+            "GetObjectPropList, one operation for a whole folder",
+        ),
+    ];
+    for (what, yes, why) in rows {
+        let mark = if yes { "yes" } else { "NO " };
+        println!("    {mark}   {what:<22}  {why}");
+    }
+
+    println!();
+    println!("--- The operations the device supports ---");
+    println!("    {} operations", info.operations_supported.len());
+    let mut line = String::new();
+    for c in &info.operations_supported {
+        let n = op::name(*c);
+        let item = if n == "unknown" {
+            format!("{c:#06x} ")
+        } else {
+            format!("{n} ")
+        };
+        if line.len() + item.len() > 68 {
+            println!("      {line}");
+            line.clear();
+        }
+        line.push_str(&item);
+    }
+    if !line.is_empty() {
+        println!("      {line}");
+    }
+
+    let _ = s.close_session();
+    Ok(())
+}
+
+/// Writes the names a telephone gives to the mode that carries files.
+///
+/// The name is not the same on each telephone. A user who looks for
+/// `File transfer` on a Samsung SM-S901U finds nothing, because that telephone
+/// names the mode `Transferring Files / Android Auto`.
+///
+/// See `docs/02-device-states.md`.
+fn print_file_mode_names(indent: &str) {
+    println!("{indent}Choose the mode that carries files. A telephone names the");
+    println!("{indent}mode in one of these ways:");
+    println!("{indent}  Transferring Files / Android Auto");
+    println!("{indent}  File Transfer");
+    println!("{indent}  Transfer files");
+    println!("{indent}  MTP");
+}
+
 /// Reads a handle from the command line. The text is decimal or hexadecimal.
 fn parse_handle(s: &str) -> Option<u32> {
     match s.strip_prefix("0x") {
@@ -1134,7 +1249,10 @@ fn report_no_storage(w: &StorageWait) {
     println!();
     println!("    Do these two things on the phone, in this order:");
     println!("      1. Unlock the screen.");
-    println!("      2. Open the USB notification and choose File transfer.");
+    println!("      2. Open the USB notification, and choose the mode that");
+    println!("         carries files.");
+    println!();
+    print_file_mode_names("         ");
     println!();
     println!("    Step 2 is the common cause. A phone in charge mode still shows");
     println!("    the MTP interface, so the host cannot see the mode. The host");

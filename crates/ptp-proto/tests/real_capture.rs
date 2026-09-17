@@ -278,3 +278,93 @@ fn rejects_a_u32_array_that_claims_more_elements_than_it_holds() {
     let got = c.payload_as_u32_array();
     assert!(got.is_err(), "got {got:?}");
 }
+
+// --- GetDeviceInfo, which decides what a filesystem can do ---
+
+#[test]
+fn parses_the_device_info_of_the_s22() {
+    let bytes = common::load("s22_device_info.hex");
+    assert_eq!(bytes.len(), 457, "the fixture holds the whole dataset");
+
+    let info = ptp_proto::DeviceInfo::parse(&bytes).expect("the capture must parse");
+
+    assert_eq!(info.standard_version, 100, "version 1.00");
+    assert_eq!(info.vendor_extension_id, 6, "Microsoft MTP");
+    assert_eq!(info.manufacturer, "samsung");
+    assert_eq!(info.model, "SM-S901U");
+    assert_eq!(info.device_version, "S901USQSAGZH3");
+    assert!(
+        info.vendor_extension_desc.contains("microsoft.com"),
+        "got {}",
+        info.vendor_extension_desc
+    );
+}
+
+/// This test records the answer a filesystem needs.
+#[test]
+fn the_s22_supports_every_operation_a_filesystem_needs() {
+    let bytes = common::load("s22_device_info.hex");
+    let info = ptp_proto::DeviceInfo::parse(&bytes).unwrap();
+
+    assert_eq!(info.operations_supported.len(), 35);
+
+    assert!(info.can_read_part(), "a read at an offset");
+    assert!(info.can_write(), "a new file");
+    assert!(info.can_delete(), "remove a file");
+    assert!(info.has_fast_listing(), "a folder in one operation");
+
+    // The 64 bit read is the one a large file needs.
+    assert!(info.supports(ptp_proto::op::GET_PARTIAL_OBJECT));
+    assert!(info.supports(ptp_proto::op::GET_PARTIAL_OBJECT_64));
+    assert!(info.supports(ptp_proto::op::SEND_PARTIAL_OBJECT));
+    assert!(info.supports(ptp_proto::op::MOVE_OBJECT));
+    assert!(
+        info.supports(ptp_proto::op::SET_OBJECT_PROP_VALUE),
+        "rename"
+    );
+}
+
+/// A device that supports fewer operations gives a different answer. The test
+/// removes the partial read from the real dataset, and checks the report.
+#[test]
+fn a_device_without_a_partial_read_reports_the_absence() {
+    let bytes = common::load("s22_device_info.hex");
+    let info = ptp_proto::DeviceInfo::parse(&bytes).unwrap();
+
+    let mut reduced = info.clone();
+    reduced.operations_supported.retain(|c| {
+        *c != ptp_proto::op::GET_PARTIAL_OBJECT && *c != ptp_proto::op::GET_PARTIAL_OBJECT_64
+    });
+
+    assert!(!reduced.can_read_part());
+    assert!(reduced.can_write(), "the other answers do not change");
+}
+
+#[test]
+fn an_operation_code_has_a_name() {
+    assert_eq!(ptp_proto::op::name(0x1009), "GetObject");
+    assert_eq!(ptp_proto::op::name(0x101b), "GetPartialObject");
+    assert_eq!(ptp_proto::op::name(0x95c1), "GetPartialObject64");
+    assert_eq!(ptp_proto::op::name(0x9805), "GetObjectPropList");
+    assert_eq!(ptp_proto::op::name(0xdead), "unknown");
+}
+
+#[test]
+fn a_truncated_device_info_gives_an_error_and_does_not_panic() {
+    let full = common::load("s22_device_info.hex");
+    for n in 0..120 {
+        let _ = ptp_proto::DeviceInfo::parse(&full[..n]);
+    }
+}
+
+/// A count that claims more codes than the buffer holds must give an error.
+#[test]
+fn a_huge_operation_count_does_not_reserve_memory() {
+    let mut bytes = common::load("s22_device_info.hex");
+    // The operation count sits after the description string and the mode.
+    // Byte 0x9b starts the count on this fixture.
+    bytes[0x9b] = 0xff;
+    bytes[0x9c] = 0xff;
+    let got = ptp_proto::DeviceInfo::parse(&bytes);
+    assert!(got.is_err(), "got {got:?}");
+}
