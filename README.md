@@ -132,6 +132,10 @@ thing you can send. See `docs/08-what-libmtp-knows.md`.
 A read gives the same bytes as a copy over `adb`. A test compares a SHA-256
 sum, for a file of 290 KB and for a file of 450 MB.
 
+A write streams through a spool file on disk, so memory stays flat. A copy of a
+649 MB file uses about 6 MB of memory. Set `BSDROID_SPOOL` to choose the folder
+for the spool file; the default is `/var/tmp`.
+
 `cp -p` works. MTP holds no time, no mode and no owner, so the filesystem
 accepts each request and changes nothing. A fault there stops a copy, and a
 copy is the job.
@@ -144,6 +148,22 @@ copy is the job.
 pkg install fusefs-libs3
 cargo build --release
 ```
+
+### Install
+
+For your own account, with no root:
+
+```
+mkdir -p ~/.local/bin
+install -m 755 target/release/mtpfs ~/.local/bin/
+install -m 755 target/release/mtpprobe ~/.local/bin/
+```
+
+Put `~/.local/bin` in your `PATH`. For the whole host, use
+`/usr/local/bin` instead.
+
+A mount needs `vfs.usermount=1`, and your account needs read and write on the
+`ugen` device. Check with `sysctl vfs.usermount`.
 
 ## Use
 

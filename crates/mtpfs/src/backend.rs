@@ -4,7 +4,7 @@
 //! runs. A session costs about 46 milliseconds to open, and a filesystem does
 //! many operations, so one session is right. See `docs/07-filesystem-design.md`.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::time::Duration;
 
 use ptp_proto::{op, Container, ContainerType, DeviceInfo, Header, ObjectInfo, ParseError};
@@ -99,6 +99,14 @@ pub enum Error {
     ///
     /// A filesystem needs a partial read, because a read asks for an offset.
     NoPartialRead,
+    /// The file is too large for the 32-bit size field of MTP.
+    TooLarge { size: u64 },
+    /// The host read fewer bytes than the host promised the device.
+    ShortRead {
+        step: &'static str,
+        want: u64,
+        got: u64,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -129,6 +137,14 @@ impl std::fmt::Display for Error {
                 "the device reports no storage. Unlock the cellphone, and put \
                  the cellphone into file transfer mode"
             ),
+            Self::TooLarge { size } => write!(
+                f,
+                "the file holds {size} bytes, and MTP allows {} at most",
+                u32::MAX
+            ),
+            Self::ShortRead { step, want, got } => {
+                write!(f, "{step}: the host promised {want} bytes and read {got}")
+            }
             Self::NoPartialRead => write!(
                 f,
                 "the device cannot read part of a file, and a filesystem needs \
@@ -164,6 +180,61 @@ pub struct DeviceEntry {
     pub product_id: u16,
     /// The maker and the model, for a person to read.
     pub name: String,
+}
+
+/// Says whether a data phase needs a packet of zero bytes at the end.
+///
+/// A device counts packets. A last packet that is full tells the device that
+/// more bytes follow, and the device then waits. A packet of zero bytes tells
+/// the device that the data phase is complete.
+pub fn needs_zero_packet(total: u64, packet: u64) -> bool {
+    packet != 0 && total % packet == 0
+}
+
+/// Splits a read that reaches the end of a file.
+///
+/// The answer holds the count for the first read, and a flag. The flag is true
+/// when the caller must read one more byte at the end.
+///
+/// A Samsung stops when the last packet of a partial read holds exactly one
+/// full packet, and the read reaches the end of the file. The workaround takes
+/// one byte from the first read, and a second read takes that byte.
+pub fn split_final_read(offset: u64, want: u64, file_size: u64, packet: u64) -> (u64, bool) {
+    let reaches_end = offset + want >= file_size;
+    if reaches_end && packet != 0 && want != 0 && want % packet == 0 {
+        (want - 1, true)
+    } else {
+        (want, false)
+    }
+}
+
+/// Fills a buffer from a reader, and reports a short read.
+fn read_exact_or_short<R: Read>(
+    reader: &mut R,
+    buf: &mut [u8],
+    step: &'static str,
+) -> Result<(), Error> {
+    let mut done = 0;
+    while done < buf.len() {
+        match reader.read(&mut buf[done..]) {
+            Ok(0) => {
+                return Err(Error::ShortRead {
+                    step,
+                    want: buf.len() as u64,
+                    got: done as u64,
+                })
+            }
+            Ok(n) => done += n,
+            Err(_) => {
+                return Err(Error::ShortRead {
+                    step,
+                    want: buf.len() as u64,
+                    got: done as u64,
+                })
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reads a node name, and gives the bus and the address.
@@ -210,6 +281,12 @@ pub struct Mtp {
     storage: u32,
     /// The operation code the device uses for a partial read.
     partial_read: u16,
+    /// The largest packet the bulk endpoints accept, in bytes.
+    ///
+    /// A data phase that is a multiple of this count needs a packet of zero
+    /// bytes at the end. The count is 512 at high speed, and 1024 at super
+    /// speed.
+    packet: u64,
     /// The bytes the host read in advance.
     cache: Option<ReadCache>,
     /// What the device says about itself.
@@ -356,6 +433,11 @@ impl Mtp {
             transaction: 0,
             storage: 0,
             partial_read: op::GET_PARTIAL_OBJECT,
+            packet: if iface.max_packet_size == 0 {
+                USB2_PACKET
+            } else {
+                iface.max_packet_size as u64
+            },
             cache: None,
             info: DeviceInfo {
                 standard_version: 0,
@@ -457,27 +539,52 @@ impl Mtp {
             return Ok(Vec::new());
         }
 
-        // The cache holds the answer for a read that follows an earlier read.
-        if let Some(c) = &self.cache {
-            if let Some(bytes) = c.get(handle, offset, want) {
-                return Ok(bytes.to_vec());
+        // A read stops at the end of the file, and not after it.
+        let want = core::cmp::min(want as u64, file_size - offset) as usize;
+        let mut out: Vec<u8> = Vec::with_capacity(want);
+
+        // The loop fills the answer. The cache gives the first part, and the
+        // device gives the rest.
+        //
+        // An earlier version gave the caller the part the cache holds, and
+        // stopped. A read that crosses the end of the cache then got fewer
+        // bytes than the caller asked for. The kernel takes a short answer as
+        // the end of the file, and a program that reads the file gets wrong
+        // bytes after 4194304 bytes. `cp` reads on a boundary of 65536 bytes
+        // and never crosses the end of the cache, so `cp` gave the right
+        // bytes and `sha256` did not.
+        while out.len() < want {
+            let at = offset + out.len() as u64;
+            let need = want - out.len();
+
+            // The cache holds the answer for a read that follows an earlier
+            // read.
+            let hit = self
+                .cache
+                .as_ref()
+                .and_then(|c| c.get(handle, at, need))
+                .map(|b| b.to_vec());
+            if let Some(bytes) = hit {
+                out.extend_from_slice(&bytes);
+                continue;
             }
+
+            // Read more than the caller asks for, and keep the rest.
+            let ahead = core::cmp::max(need as u64, READ_AHEAD as u64);
+            let ask = core::cmp::min(ahead, file_size - at);
+            let data = self.read_from_device(handle, at, ask, file_size)?;
+            if data.is_empty() {
+                break;
+            }
+            let take = core::cmp::min(need, data.len());
+            out.extend_from_slice(&data[..take]);
+            self.cache = Some(ReadCache {
+                handle,
+                start: at,
+                data,
+            });
         }
 
-        // Read more than the caller asks for, and keep the rest.
-        let ahead = core::cmp::max(want, READ_AHEAD) as u64;
-        let ask = core::cmp::min(ahead, file_size - offset);
-        let data = self.read_from_device(handle, offset, ask, file_size)?;
-
-        let out = {
-            let end = core::cmp::min(want, data.len());
-            data[..end].to_vec()
-        };
-        self.cache = Some(ReadCache {
-            handle,
-            start: offset,
-            data,
-        });
         Ok(out)
     }
 
@@ -489,20 +596,34 @@ impl Mtp {
         want: u64,
         file_size: u64,
     ) -> Result<Vec<u8>, Error> {
-        let mut want = want;
-
         // The fault needs two things at once: the read reaches the end of the
-        // file, and the last packet holds exactly one USB 2.0 packet.
+        // file, and the last packet holds exactly one USB packet.
         //
         // An earlier version took one byte from every read, and not only from
         // a read at the end. Every read then asked for a count that is not a
         // multiple of the packet size, and the device gave wrong bytes after
         // 131072 bytes. See docs/07-filesystem-design.md.
-        let reaches_end = offset + want >= file_size;
-        if reaches_end && want % USB2_PACKET == 0 {
-            want -= 1;
+        let (first, short) = split_final_read(offset, want, file_size, self.packet);
+
+        let mut data = self.partial_read(handle, offset, first)?;
+
+        // The read above left one byte. A second read takes the byte, and the
+        // count of one is not a multiple of the packet size, so the fault does
+        // not happen again.
+        //
+        // An earlier version gave the answer of the first read to the caller.
+        // A file whose last read is a multiple of the packet size then lost the
+        // last byte. A file of 307200 bytes read back as 307199 bytes.
+        if short && data.len() as u64 == first {
+            let tail = self.partial_read(handle, offset + first, 1)?;
+            data.extend_from_slice(&tail);
         }
 
+        Ok(data)
+    }
+
+    /// Asks the device for a count of bytes, with no workaround.
+    fn partial_read(&mut self, handle: u32, offset: u64, want: u64) -> Result<Vec<u8>, Error> {
         let params: Vec<u32> = if self.partial_read == op::GET_PARTIAL_OBJECT_64 {
             vec![
                 handle,
@@ -643,6 +764,129 @@ impl Mtp {
         self.info.supports(OP_MOVE_OBJECT)
     }
 
+    /// Writes a new object, and reads the bytes from a reader.
+    ///
+    /// The host does not hold the object in memory. A file of 4 GB therefore
+    /// needs no memory of 4 GB.
+    ///
+    /// `size` must be the count of bytes the reader gives. MTP needs the size
+    /// before the bytes, and the device reads exactly that count.
+    pub fn send_object_stream<R: Read>(
+        &mut self,
+        parent: u32,
+        name: &str,
+        reader: &mut R,
+        size: u64,
+    ) -> Result<u32, Error> {
+        // MTP gives 32 bits for the size of an object. A file of 4 GB or more
+        // needs the 64-bit form, which this version does not send.
+        if size > u32::MAX as u64 {
+            return Err(Error::TooLarge { size });
+        }
+
+        let info =
+            ptp_proto::ObjectInfo::build_for_send(self.storage, parent, name, size as u32, false);
+
+        let parent_arg = if parent == ROOT { 0xffff_ffff } else { parent };
+
+        let (code, resp) = self.operation_with_data(
+            "SendObjectInfo",
+            OP_SEND_OBJECT_INFO,
+            &[self.storage, parent_arg],
+            &info,
+        )?;
+        if code != RESP_OK {
+            return Err(Error::Device {
+                step: "SendObjectInfo",
+                code,
+            });
+        }
+        let handle = resp.get(2).copied().ok_or(Error::Device {
+            step: "SendObjectInfo",
+            code,
+        })?;
+
+        let (code, _) =
+            self.operation_with_reader("SendObject", OP_SEND_OBJECT, &[], reader, size)?;
+        if code != RESP_OK {
+            return Err(Error::Device {
+                step: "SendObject",
+                code,
+            });
+        }
+        self.cache = None;
+        Ok(handle)
+    }
+
+    /// Does one operation, and reads the data phase from a reader.
+    ///
+    /// The function holds one buffer, and not the whole payload.
+    fn operation_with_reader<R: Read>(
+        &mut self,
+        step: &'static str,
+        code: u16,
+        params: &[u32],
+        reader: &mut R,
+        size: u64,
+    ) -> Result<(u16, Vec<u32>), Error> {
+        let tid = self.transaction;
+        self.transaction = self.transaction.wrapping_add(1);
+
+        let command = ptp_proto::build_command(code, tid, params);
+        self.channels.write.write(&command, TIMEOUT)?;
+
+        // The first write holds the header, and the start of the payload.
+        let total = (ptp_proto::HEADER_LEN as u64 + size) as u32;
+        let mut first = ptp_proto::build(ptp_proto::ContainerType::Data, code, tid, &[]);
+        first[0..4].copy_from_slice(&total.to_le_bytes());
+
+        let mut buf = vec![0u8; WRITE_CHUNK];
+        let room = WRITE_CHUNK - ptp_proto::HEADER_LEN;
+        let want = core::cmp::min(room as u64, size) as usize;
+        read_exact_or_short(reader, &mut buf[..want], step)?;
+        first.extend_from_slice(&buf[..want]);
+        self.channels.write.write(&first, TIMEOUT)?;
+
+        let mut sent = want as u64;
+
+        // The loop has a bound that comes from the size, so the loop stops.
+        let rounds = size / WRITE_CHUNK as u64 + 4;
+        for _ in 0..rounds {
+            if sent >= size {
+                break;
+            }
+            let want = core::cmp::min(WRITE_CHUNK as u64, size - sent) as usize;
+            read_exact_or_short(reader, &mut buf[..want], step)?;
+            self.channels.write.write(&buf[..want], TIMEOUT)?;
+            sent += want as u64;
+        }
+
+        if sent < size {
+            return Err(Error::ShortRead {
+                step,
+                want: size,
+                got: sent,
+            });
+        }
+
+        // A data phase that ends on a packet boundary needs a packet of zero
+        // bytes. The device counts packets, and a full last packet tells the
+        // device that more bytes follow. The device then waits, and the
+        // transfer stops.
+        //
+        // A file of 524276 bytes gives a data phase of 524288 bytes, which is
+        // 1024 packets of 512 bytes. That file stopped the device before this
+        // code.
+        if needs_zero_packet(total as u64, self.packet) {
+            self.channels.write.write(&[], TIMEOUT)?;
+        }
+
+        let mut rbuf = vec![0u8; READ_BUFFER];
+        let n = self.channels.read.read(&mut rbuf, TIMEOUT)?;
+        let c = Container::parse(&rbuf[..n])?;
+        Ok((c.code, c.parameters()))
+    }
+
     /// Removes an object from the device.
     pub fn delete_object(&mut self, handle: u32) -> Result<(), Error> {
         let (code, _) = self.operation_code("DeleteObject", OP_DELETE_OBJECT, &[handle, 0])?;
@@ -698,6 +942,18 @@ impl Mtp {
             let end = core::cmp::min(sent + WRITE_CHUNK, payload.len());
             self.channels.write.write(&payload[sent..end], TIMEOUT)?;
             sent = end;
+        }
+
+        // A data phase that ends on a packet boundary needs a packet of zero
+        // bytes. The device counts packets, and a full last packet tells the
+        // device that more bytes follow. The device then waits, and the
+        // transfer stops.
+        //
+        // A file of 524276 bytes gives a data phase of 524288 bytes, which is
+        // 1024 packets of 512 bytes. That file stopped the device before this
+        // code.
+        if needs_zero_packet(total as u64, self.packet) {
+            self.channels.write.write(&[], TIMEOUT)?;
         }
 
         // Read the response.
@@ -847,5 +1103,70 @@ impl Write for Sink {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod packet_tests {
+    use super::{needs_zero_packet, split_final_read};
+
+    #[test]
+    fn a_full_last_packet_needs_a_packet_of_zero_bytes() {
+        // A file of 524276 bytes gives a data phase of 524288 bytes, which is
+        // 1024 packets of 512 bytes. That size stopped a Samsung.
+        assert!(needs_zero_packet(524288, 512));
+        assert!(needs_zero_packet(512, 512));
+        assert!(needs_zero_packet(1024, 1024));
+    }
+
+    #[test]
+    fn a_part_packet_needs_no_packet_of_zero_bytes() {
+        // A file of 680397437 bytes gives 680397449, which is not a multiple.
+        assert!(!needs_zero_packet(680_397_449, 512));
+        assert!(!needs_zero_packet(1, 512));
+        assert!(!needs_zero_packet(513, 512));
+    }
+
+    #[test]
+    fn a_packet_size_of_zero_asks_for_no_packet() {
+        assert!(!needs_zero_packet(512, 0));
+    }
+
+    #[test]
+    fn a_read_to_the_end_on_a_packet_boundary_keeps_one_byte_back() {
+        // A file of 307200 bytes read back as 307199 bytes before this code.
+        assert_eq!(split_final_read(0, 307_200, 307_200, 512), (307_199, true));
+        assert_eq!(split_final_read(0, 512, 512, 512), (511, true));
+    }
+
+    #[test]
+    fn a_read_in_the_middle_keeps_no_byte_back() {
+        assert_eq!(
+            split_final_read(0, 4_194_304, 100_000_000, 512),
+            (4_194_304, false)
+        );
+    }
+
+    #[test]
+    fn a_read_to_the_end_off_a_packet_boundary_keeps_no_byte_back() {
+        assert_eq!(split_final_read(0, 307_201, 307_201, 512), (307_201, false));
+    }
+
+    #[test]
+    fn a_super_speed_packet_is_1024_bytes() {
+        assert_eq!(split_final_read(0, 4096, 4096, 1024), (4095, true));
+        // The same read at 512 bytes also sits on a boundary.
+        assert_eq!(split_final_read(0, 4096, 4096, 512), (4095, true));
+        // A count of 1536 is a multiple of 512, and not of 1024.
+        assert_eq!(split_final_read(0, 1536, 1536, 1024), (1536, false));
+    }
+
+    #[test]
+    fn the_two_reads_add_up_to_the_count_the_caller_asked_for() {
+        for want in [512u64, 1024, 4096, 307_200, 4_194_304] {
+            let (first, short) = split_final_read(0, want, want, 512);
+            let total = if short { first + 1 } else { first };
+            assert_eq!(total, want, "a read of {want} bytes lost a byte");
+        }
     }
 }

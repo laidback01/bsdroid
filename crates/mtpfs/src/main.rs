@@ -30,13 +30,67 @@ struct Fs {
 }
 
 /// A file a program is writing.
+///
+/// The bytes go to a spool file on the disk of the host, and not to memory. A
+/// copy of a file of 4 GB therefore costs 4 GB of disk, and about 512 KB of
+/// memory.
 struct Pending {
     /// The folder that holds the new file.
     parent: u32,
     /// The name of the new file.
     name: String,
-    /// The bytes so far.
-    data: Vec<u8>,
+    /// The spool file that holds the bytes.
+    file: std::fs::File,
+    /// The path of the spool file.
+    spool: std::path::PathBuf,
+    /// The count of bytes the program wrote.
+    size: u64,
+}
+
+impl Drop for Pending {
+    /// Removes the spool file.
+    ///
+    /// The mount removes the file after a send, and after a fault. A program
+    /// that stops the mount in the middle of a write also removes the file,
+    /// because `Fs` holds each `Pending`.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.spool);
+    }
+}
+
+/// Gives the folder for a spool file.
+///
+/// The order is `BSDROID_SPOOL`, then `TMPDIR`, then `/var/tmp`. `/var/tmp` is
+/// on a disk, and `/tmp` on some hosts is in memory. A spool file in memory
+/// gives back the cost this design removes.
+fn spool_dir() -> std::path::PathBuf {
+    if let Ok(d) = std::env::var("BSDROID_SPOOL") {
+        return std::path::PathBuf::from(d);
+    }
+    if let Ok(d) = std::env::var("TMPDIR") {
+        return std::path::PathBuf::from(d);
+    }
+    std::path::PathBuf::from("/var/tmp")
+}
+
+/// The count of spool files this program made.
+///
+/// The number makes each name different, so two writes at one time do not
+/// share a file.
+static SPOOL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Makes a spool file, and gives the file and the path.
+fn make_spool() -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
+    let n = SPOOL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let path = spool_dir().join(format!("mtpfs-{pid}-{n}.spool"));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)?;
+    Ok((file, path))
 }
 
 /// The state, in a wrapper that the compiler accepts in a static.
@@ -287,7 +341,7 @@ unsafe extern "C" fn op_getattr(
 
     // A file a program is writing is not on the device yet.
     if let Some(p) = fs.pending.get(&path) {
-        let size = p.data.len() as u64;
+        let size = p.size;
         // SAFETY: FUSE gives a buffer for one stat.
         unsafe {
             core::ptr::write_bytes(st, 0, 1);
@@ -576,12 +630,22 @@ unsafe extern "C" fn op_create(
         None => return -libc_enoent(),
     };
 
+    let (file, spool) = match make_spool() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("mtpfs: cannot make a spool file in {:?}: {e}", spool_dir());
+            return -libc_eio();
+        }
+    };
+
     fs.pending.insert(
         path,
         Pending {
             parent,
             name,
-            data: Vec::new(),
+            file,
+            spool,
+            size: 0,
         },
     );
     if !fi.is_null() {
@@ -610,15 +674,30 @@ unsafe extern "C" fn op_write(
         None => return -libc_erofs(),
     };
 
-    let offset = offset as usize;
-    let end = offset + size;
-    if p.data.len() < end {
-        p.data.resize(end, 0);
-    }
     // SAFETY: FUSE gives a buffer of `size` bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf as *const u8, p.data[offset..].as_mut_ptr(), size)
-    };
+    let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, size) };
+
+    use std::os::unix::fs::FileExt;
+    let mut done = 0;
+    while done < size {
+        match p.file.write_at(&bytes[done..], offset as u64 + done as u64) {
+            Ok(0) => break,
+            Ok(n) => done += n,
+            Err(e) => {
+                eprintln!("mtpfs: cannot write the spool file: {e}");
+                return -libc_eio();
+            }
+        }
+    }
+    if done < size {
+        eprintln!("mtpfs: the spool file took {done} bytes of {size}");
+        return -libc_eio();
+    }
+
+    let end = offset as u64 + size as u64;
+    if end > p.size {
+        p.size = end;
+    }
     size as i32
 }
 
@@ -631,15 +710,25 @@ unsafe extern "C" fn op_release(path: *const i8, _fi: *mut sys::fuse_file_info) 
         None => return 0,
     };
 
-    let p = match fs.pending.remove(&path) {
+    let mut p = match fs.pending.remove(&path) {
         Some(p) => p,
         None => return 0,
     };
 
-    match fs.mtp.send_object(p.parent, &p.name, &p.data, false) {
+    // The reader starts at the first byte. `Pending` removes the spool file.
+    use std::io::Seek;
+    if let Err(e) = p.file.seek(std::io::SeekFrom::Start(0)) {
+        eprintln!("mtpfs: cannot read the spool file: {e}");
+        return -libc_eio();
+    }
+
+    let size = p.size;
+    let parent = p.parent;
+    let name = p.name.clone();
+    match fs.mtp.send_object_stream(parent, &name, &mut p.file, size) {
         Ok(_) => {
             // The folder holds a new object, so the listing is old.
-            fs.tree.forget_listing(p.parent);
+            fs.tree.forget_listing(parent);
             0
         }
         Err(e) => {
@@ -663,7 +752,11 @@ unsafe extern "C" fn op_truncate(
     };
     match fs.pending.get_mut(&path) {
         Some(p) => {
-            p.data.resize(size as usize, 0);
+            if let Err(e) = p.file.set_len(size as u64) {
+                eprintln!("mtpfs: cannot set the size of the spool file: {e}");
+                return -libc_eio();
+            }
+            p.size = size as u64;
             0
         }
         // A file on the device does not change size in this version.

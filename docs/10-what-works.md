@@ -155,10 +155,80 @@ Stop the mount and start the mount again to see a change from another program.
 A program closes a new file, and the file then goes to the device. MTP needs
 the size of a file before the bytes. A program gives no size in advance.
 
-The host therefore holds the whole file in memory until the close. A copy of a
-file of 4 GB to the device needs 4 GB of memory.
+The host therefore holds the bytes until the close. The bytes go to a spool
+file on a disk, and not to memory. A copy of a file of 649 MB costs about 6 MB
+of memory, and 649 MB of disk.
+
+An earlier version held the bytes in memory. A copy of a file of 4 GB then
+needed 4 GB of memory.
+
+The spool file goes in one of three folders. The mount takes the first folder
+in this list that has a path:
+
+1. The folder in `BSDROID_SPOOL`.
+2. The folder in `TMPDIR`.
+3. `/var/tmp`.
+
+`/var/tmp` is the default because `/tmp` on some hosts is in memory. A spool
+file in memory gives back the cost this design removes. Set `BSDROID_SPOOL` to
+a folder with free space for the largest file you copy.
+
+The mount removes the spool file after the send, and after a fault.
 
 A read costs 4 MB, and not the size of the file.
+
+## Three faults at a packet boundary
+
+A USB packet holds 512 bytes at high speed, and 1024 bytes at super speed. A
+count of bytes that is a multiple of the packet size found three faults. Each
+one is now a test in `crates/mtpfs/src/backend.rs`.
+
+### A read lost the last byte
+
+A Samsung stops on two conditions at once. The last packet of a partial read is
+full, and the read reaches the end of the file. The workaround takes one byte
+from the read.
+
+An earlier version gave the short answer to the caller. A file of 307200 bytes
+therefore read back as 307199 bytes. The count 307200 is 600 packets of 512
+bytes.
+
+The read now takes the last byte in a second request. The count of one is not a
+multiple of the packet size, so the fault does not happen again.
+
+### A write stopped the device
+
+A data phase that ends on a packet boundary needs a packet of zero bytes. The
+device counts packets, and a full last packet says that more bytes follow. The
+device then waits, and the transfer stops.
+
+A file of 524276 bytes gives a data phase of 524288 bytes, which is 1024
+packets. That file stopped the device.
+
+The host now sends a packet of zero bytes for a data phase that is a multiple
+of the packet size.
+
+### A read crossed the end of the cache
+
+The cache holds 4194304 bytes. A read that starts inside the cache, and ends
+after the cache, got only the part the cache holds.
+
+The kernel takes a short answer as the end of the file. A program that reads
+the file then got wrong bytes after 4194304 bytes.
+
+`cp` reads on a boundary of 65536 bytes, and 65536 divides 4194304. `cp` never
+crossed the end of the cache, and `cp` gave the right bytes. `sha256` reads
+with a different count, and `sha256` gave a different answer for the same file.
+The two answers found the fault.
+
+The read now fills the whole request. The cache gives the first part, and the
+device gives the rest.
+
+### What the tests cover
+
+Each fault has a test with the number that found the fault. One test adds the
+two parts of a split read, and checks that the total is the count the caller
+asked for.
 
 ## The device, and not the filesystem
 
