@@ -1,0 +1,20 @@
+# Settings for bsdroid-automount.
+#
+# Copy this file to /usr/local/etc/bsdroid-automount.conf and change it.
+# The file is shell, so each line is an assignment.
+
+# The account that owns the mount. An empty value means the script looks for
+# the account that runs the desktop.
+#
+# The account needs membership of the `operator` group, and the host needs
+# `vfs.usermount=1`.
+MOUNT_USER=""
+
+# The folder that holds each mount point.
+MOUNT_ROOT=/media
+
+# The program that does the mount.
+MTPFS=/usr/local/bin/mtpfs
+
+# The count of seconds the script waits for the mount to appear.
+MOUNT_WAIT=25

@@ -1,0 +1,269 @@
+#!/bin/sh
+# Mounts and unmounts a cellphone for devd.
+#
+# devd calls this script. A person does not call this script.
+#
+# Usage:
+#   bsdroid-automount attach <cdev> <vendor> <product> [sernum]
+#   bsdroid-automount detach <cdev> <vendor> <product> [sernum]
+#
+# The script writes each message to syslog. Read the messages with:
+#   tail -f /var/log/messages | grep bsdroid
+#
+# Settings live in /usr/local/etc/bsdroid-automount.conf. See the block below
+# for each name and each default.
+
+set -u
+
+CONF=/usr/local/etc/bsdroid-automount.conf
+
+# The account that owns the mount. The mount runs as this account, and not as
+# root, so the account needs:
+#   - membership of the `operator` group, for the ugen device
+#   - `vfs.usermount=1`
+MOUNT_USER=""
+
+# The folder that holds each mount point.
+MOUNT_ROOT=/media
+
+# The program that does the mount.
+MTPFS=/usr/local/bin/mtpfs
+
+# The count of seconds the script waits for the mount to appear.
+MOUNT_WAIT=25
+
+# The folder that holds the state of each mount.
+RUN_DIR=/var/run
+
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+
+say() { logger -t bsdroid-automount -p daemon.notice "$*"; }
+err() { logger -t bsdroid-automount -p daemon.err "$*"; }
+
+action=${1:-}
+cdev=${2:-}
+vendor=${3:-}
+product=${4:-}
+sernum=${5:-}
+
+[ -n "$action" ] || { err "no action"; exit 64; }
+[ -n "$cdev" ] || { err "no device"; exit 64; }
+
+# --- Find the account ---
+#
+# An empty MOUNT_USER means the script looks for the account that runs the
+# desktop. Each step is a guess, so name the account in $CONF if you can.
+#
+# A host with no login in the `who` table gives nothing from step 1. A host
+# that starts the desktop from a display manager is such a host.
+if [ -z "$MOUNT_USER" ]; then
+    # 1. A login on a display or on a text console.
+    MOUNT_USER=$(who 2>/dev/null | awk '$2 ~ /^:|^ttyv/ { print $1; exit }')
+fi
+if [ -z "$MOUNT_USER" ]; then
+    # 2. The account that runs a desktop session.
+    for p in gnome-session plasmashell xfce4-session mate-session \
+             cinnamon-session lxsession openbox i3 sway dwm; do
+        MOUNT_USER=$(pgrep -n "$p" 2>/dev/null | head -1 |
+            xargs -r ps -o user= -p 2>/dev/null | tr -d ' ')
+        [ -n "$MOUNT_USER" ] && break
+    done
+fi
+if [ -z "$MOUNT_USER" ]; then
+    # 3. The first account of a person on the host.
+    MOUNT_USER=$(awk -F: '$3>=1000 && $3<65534 && $7 !~ /nologin|false/ \
+        { print $1; exit }' /etc/passwd)
+fi
+if [ -z "$MOUNT_USER" ]; then
+    err "no account to mount for. Set MOUNT_USER in $CONF"
+    exit 78
+fi
+
+# --- The key for the state of this cellphone ---
+#
+# The serial number names one cellphone. devd gives the serial number for an
+# attach event and for a detach event, so the two events share one key.
+#
+# The key cannot be the mount point, because a detach event arrives when the
+# cellphone is gone. The name of the mount point comes from the cellphone, and
+# a cellphone that is gone answers nothing. The state file holds the answer
+# from the attach event.
+key=$(printf '%s' "${sernum:-$cdev}" | tr -c 'A-Za-z0-9._-' '-')
+state="$RUN_DIR/bsdroid-mount-$key"
+lock="$RUN_DIR/bsdroid-lock-$key"
+
+# Makes a name for a mount point from the name of a cellphone.
+#
+# `samsung SM-S901U` gives `samsung-sm-s901u`.
+label_of() {
+    printf '%s' "$1" |
+        tr 'A-Z' 'a-z' |
+        tr -c 'a-z0-9' '-' |
+        sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//'
+}
+
+mounted_at() {
+    mount | grep -q " $1 "
+}
+
+case "$action" in
+attach)
+    # devd waits for this script, so the work happens in another process. A
+    # script that keeps devd busy stops every other rule on the host.
+    if [ "${BSDROID_CHILD:-}" != "1" ]; then
+        BSDROID_CHILD=1 export BSDROID_CHILD
+        daemon -f "$0" "$@"
+        exit 0
+    fi
+
+    # One attach at a time for one cellphone.
+    #
+    # A cellphone gives more than one ATTACH event. The observed order for a
+    # Samsung is ATTACH, DETACH, ATTACH, because the cellphone joins the bus
+    # again when a person selects the USB mode. Two helpers then run at one
+    # time, and both start a mount of the same folder.
+    #
+    # The lock waits, and does not give up at once. The second ATTACH is the
+    # event that carries the cellphone a person wants, so a helper that drops
+    # the second event drops the mount.
+    if [ "${BSDROID_LOCKED:-}" != "1" ]; then
+        BSDROID_LOCKED=1 export BSDROID_LOCKED
+        exec lockf -s -t $((MOUNT_WAIT + 5)) "$lock" "$0" "$@"
+    fi
+
+    if [ -r "$state" ] && mounted_at "$(cat "$state")"; then
+        say "$(cat "$state") already holds a mount"
+        exit 0
+    fi
+
+    if [ ! -x "$MTPFS" ]; then
+        err "$MTPFS is not there"
+        exit 69
+    fi
+
+    # --- Ask the cellphone for its name ---
+    #
+    # The answer does two jobs. It gives the name of the mount point, and it
+    # says whether the cellphone gives MTP at all.
+    #
+    # A cellphone in charge mode gives no MTP, and that is not a fault. The
+    # script stops here, and makes no folder. A person who selects file
+    # transfer mode makes a new ATTACH event, and this script runs again.
+    #
+    # `mtpfs --name` waits for the interface to appear, so this call also
+    # covers the delay between the attach event and a working MTP interface.
+    name=$(su -m "$MOUNT_USER" -c "$MTPFS --name $cdev" 2>/dev/null)
+    if [ -z "$name" ]; then
+        say "$cdev gives no MTP, so nothing is mounted"
+        exit 0
+    fi
+
+    label=$(label_of "$name")
+    [ -n "$label" ] || label="mtp-${vendor#0x}"
+    mount_point="$MOUNT_ROOT/$label"
+
+    if mounted_at "$mount_point"; then
+        say "$mount_point already holds a mount"
+        printf '%s\n' "$mount_point" > "$state"
+        exit 0
+    fi
+
+    # The account must own the mount point, because `vfs.usermount` gives a
+    # mount to the owner of the folder alone.
+    if [ ! -d "$mount_point" ]; then
+        mkdir -p "$mount_point" || { err "cannot make $mount_point"; exit 73; }
+    fi
+    chown "$MOUNT_USER" "$mount_point" 2>/dev/null
+
+    say "mount $name on $mount_point for $MOUNT_USER"
+    su -m "$MOUNT_USER" -c "$MTPFS $cdev $mount_point" >/dev/null 2>&1
+
+    # The program goes to the background before the mount is ready, so the
+    # script reads the mount table. It does not wait for the program.
+    i=0
+    while [ "$i" -lt "$MOUNT_WAIT" ]; do
+        if mounted_at "$mount_point"; then
+            printf '%s\n' "$mount_point" > "$state"
+            say "$mount_point is ready"
+            exit 0
+        fi
+        # A cellphone that leaves the bus ends the wait. A person who selects
+        # the USB mode makes the cellphone leave and join again, and the next
+        # ATTACH event needs this lock. A helper that waits for the whole
+        # deadline holds the lock, and the mount that would work never starts.
+        if [ ! -c "/dev/$cdev" ]; then
+            say "$cdev left the bus, so this mount stops"
+            exit 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    err "$mount_point did not appear in $MOUNT_WAIT seconds"
+    exit 75
+    ;;
+
+detach)
+    # The cellphone is gone, so the name of the mount point comes from the
+    # state file and not from the cellphone.
+    if [ -r "$state" ]; then
+        mount_point=$(cat "$state")
+        rm -f "$state"
+    else
+        mount_point=""
+    fi
+
+    # A state file that is not there leaves one way to find the mount: look at
+    # each mount of this filesystem, and find the mount that answers nothing.
+    # A mount of a cellphone that is gone fails at once, and does not wait.
+    #
+    # The test runs as the account that made the mount, and not as root. FUSE
+    # gives a mount to that account alone, so a test as root fails for every
+    # mount, and the answer is then "each mount is dead". An earlier version
+    # ran the test as root, and unmounted a cellphone that was working.
+    #
+    # The `mount` table names the account:
+    #   mtpfs on /media/samsung-sm-s901u (fusefs, nosuid, mounted by jax)
+    if [ -z "$mount_point" ] || ! mounted_at "$mount_point"; then
+        mount | awk '$1=="mtpfs" {
+            point = $3
+            owner = ""
+            if (match($0, /mounted by [A-Za-z0-9._-]+/))
+                owner = substr($0, RSTART + 11, RLENGTH - 11)
+            print point "\t" owner
+        }' > "$RUN_DIR/bsdroid-scan-$$"
+        while IFS='	' read -r point owner; do
+            [ -n "$point" ] || continue
+            if [ -n "$owner" ]; then
+                su -m "$owner" -c "timeout 5 ls '$point'" >/dev/null 2>&1 &&
+                    continue
+            else
+                timeout 5 ls "$point" >/dev/null 2>&1 && continue
+            fi
+            mount_point="$point"
+            break
+        done < "$RUN_DIR/bsdroid-scan-$$"
+        rm -f "$RUN_DIR/bsdroid-scan-$$"
+    fi
+
+    [ -n "$mount_point" ] || exit 0
+    mounted_at "$mount_point" || exit 0
+
+    # `umount -f` is the answer for a device that is not there, because the
+    # session cannot end in the normal way.
+    say "unmount $mount_point"
+    umount "$mount_point" 2>/dev/null ||
+        umount -f "$mount_point" 2>/dev/null
+    if mounted_at "$mount_point"; then
+        err "$mount_point still holds a mount"
+        exit 75
+    fi
+    exit 0
+    ;;
+
+*)
+    err "unknown action $action"
+    exit 64
+    ;;
+esac
