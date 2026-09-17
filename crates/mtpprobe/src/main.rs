@@ -6,22 +6,65 @@
 //!
 //! Every step has a deadline. The program always stops.
 
-mod session;
-
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use ptp_proto::{op, DeviceInfo, ObjectInfo, StorageInfo};
+use mtp_session::{Config, Session, SessionOpen};
+use ptp_proto::{association, op, resp, DeviceInfo, ObjectInfo, StorageInfo};
 use usb_freebsd::descriptor::{ConfigDescriptor, MtpInterface};
-use usb_freebsd::device::{Backend, LinkSpeed, OpenDevice};
-
-use session::{response_name, Session};
+use usb_freebsd::device::{Backend, LinkSpeed, MtpChannels, OpenDevice};
 
 /// The deadline for one transfer.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The buffer size for a bulk endpoint, in bytes.
 const BULK_BUFFER: u32 = 16 * 1024;
+
+/// Builds the session settings for one interface.
+///
+/// The packet size comes from the endpoint, so a super speed link gets 1024
+/// and a high speed link gets 512.
+fn config_for(iface: &MtpInterface) -> Config {
+    Config {
+        timeout: TIMEOUT,
+        packet: u64::from(iface.max_packet_size),
+        ..Config::default()
+    }
+}
+
+/// Starts a session, opens a PTP session, and reports what that needed.
+///
+/// The session layer writes nothing, so the words live here. The function
+/// prints a line for each repair the host had to do, and nothing at all when
+/// the device answers the first time.
+fn start_session<'a>(
+    channels: MtpChannels<'a>,
+    iface: &MtpInterface,
+    id: u32,
+) -> Result<(Session<'a>, SessionOpen), String> {
+    let (mut s, dropped) = Session::new(channels, config_for(iface));
+    if dropped > 0 {
+        println!("    the device still held {dropped} bytes, and the host dropped them");
+    }
+
+    let open = s.open_session_or_repair(id).map_err(|e| format!("{e}"))?;
+
+    if open.repaired {
+        println!("    a session from an earlier program is open, and the host closed it");
+        match open.close_response {
+            Some(c) => println!("    CloseSession gave {c:#06x} {}", resp::name(c)),
+            None => println!("    CloseSession failed"),
+        }
+        if open.dropped > 0 {
+            println!("    the host dropped {} more bytes", open.dropped);
+        }
+    }
+    if open.wedged {
+        report_wedged_service();
+    }
+
+    Ok((s, open))
+}
 
 /// The count of cycles the reopen test does, if the user gives no count.
 const DEFAULT_CYCLES: u32 = 20;
@@ -262,23 +305,23 @@ fn probe() -> Result<(), String> {
     let channels = open
         .open_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let mut s = Session::new(channels, TIMEOUT);
 
     println!();
     println!("--- Session 1 ---");
-    let o = s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
+    let (mut s, opened) = start_session(channels, &iface, 1)?;
+    let o = opened.outcome;
     println!(
         "    {:<16} {:>6} ms   {:#06x} {}",
         "OpenSession",
         o.elapsed.as_millis(),
         o.response_code,
-        response_name(o.response_code)
+        resp::name(o.response_code)
     );
     if !o.is_ok() {
         return Err(format!(
             "OpenSession gave {:#06x} {}",
             o.response_code,
-            response_name(o.response_code)
+            resp::name(o.response_code)
         ));
     }
 
@@ -302,12 +345,7 @@ fn probe() -> Result<(), String> {
     println!("      storages: {storage_ids:?}");
 
     for id in &storage_ids {
-        let info = step(
-            &mut s,
-            "GetStorageInfo",
-            session::OP_GET_STORAGE_INFO,
-            &[*id],
-        )?;
+        let info = step(&mut s, "GetStorageInfo", op::GET_STORAGE_INFO, &[*id])?;
         match StorageInfo::parse(&info.data) {
             Ok(si) => {
                 println!("      description: {}", si.storage_description);
@@ -318,7 +356,7 @@ fn probe() -> Result<(), String> {
         }
     }
 
-    step(&mut s, "CloseSession", session::OP_CLOSE_SESSION, &[])?;
+    step(&mut s, "CloseSession", op::CLOSE_SESSION, &[])?;
 
     // `simple-mtpfs` opens a session, closes the session, and opens a second
     // session. A test showed that the phone accepts the second session. See
@@ -332,7 +370,7 @@ fn probe() -> Result<(), String> {
         "    OpenSession      {:>6} ms   {:#06x} {}",
         o.elapsed.as_millis(),
         o.response_code,
-        response_name(o.response_code)
+        resp::name(o.response_code)
     );
     let _ = s.close_session();
 
@@ -379,13 +417,11 @@ fn reopen(cycles: u32) -> Result<(), String> {
             let channels = open
                 .open_mtp(&iface, BULK_BUFFER)
                 .map_err(|e| format!("cannot open the endpoints: {e}"))?;
-            let mut s = Session::new(channels, TIMEOUT);
-
-            s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
+            let (mut s, _) = start_session(channels, &iface, 1)?;
             let ids = s
-                .operation("GetStorageIDs", session::OP_GET_STORAGE_IDS, &[])
+                .operation("GetStorageIDs", op::GET_STORAGE_IDS, &[])
                 .map_err(|e| format!("{e}"))?;
-            let count = storage_ids_from(&ids.data).len() as u16;
+            let count = ids.as_u32_array().map_err(|e| format!("{e}"))?.len() as u16;
             s.close_session().map_err(|e| format!("{e}"))?;
             Ok(count)
         })();
@@ -432,17 +468,6 @@ fn reopen(cycles: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Reads the storage identifiers from the payload of `GetStorageIDs`.
-///
-/// The payload starts with a `u32` count, and the identifiers follow.
-fn storage_ids_from(data: &[u8]) -> Vec<u32> {
-    data.get(4..)
-        .unwrap_or(&[])
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
-}
-
 /// Counts the objects, and reads the root folder.
 ///
 /// The command answers two questions:
@@ -480,9 +505,7 @@ fn objects() -> Result<(), String> {
     let channels = open
         .open_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let mut s = Session::new(channels, TIMEOUT);
-
-    s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
+    let (mut s, _) = start_session(channels, &iface, 1)?;
     let w = wait_for_storage(&mut s)?;
     if w.ids.is_empty() {
         report_no_storage(&w);
@@ -505,18 +528,14 @@ fn objects() -> Result<(), String> {
         let out = s
             .operation(
                 "GetObjectHandles",
-                session::OP_GET_OBJECT_HANDLES,
+                op::GET_OBJECT_HANDLES,
                 &[storage, 0, parent],
             )
             .map_err(|e| format!("{e}"))?;
 
         let handles: Vec<u32> = out
-            .data
-            .get(4..)
-            .unwrap_or(&[])
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+            .as_u32_array()
+            .map_err(|e| format!("GetObjectHandles: {e}"))?;
 
         println!(
             "    {:>6} ms   {} objects   {} data bytes   {} read(s)",
@@ -535,7 +554,7 @@ fn objects() -> Result<(), String> {
 
         for h in handles.iter().take(show) {
             let info = s
-                .operation("GetObjectInfo", session::OP_GET_OBJECT_INFO, &[*h])
+                .operation("GetObjectInfo", op::GET_OBJECT_INFO, &[*h])
                 .map_err(|e| format!("{e}"))?;
             match ObjectInfo::parse(&info.data) {
                 Ok(o) => {
@@ -660,9 +679,7 @@ fn bench() -> Result<(), String> {
     let channels = open
         .open_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let mut s = Session::new(channels, TIMEOUT);
-
-    s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
+    let (mut s, _) = start_session(channels, &iface, 1)?;
     let w = wait_for_storage(&mut s)?;
     if w.ids.is_empty() {
         report_no_storage(&w);
@@ -677,22 +694,18 @@ fn bench() -> Result<(), String> {
     let list = s
         .operation(
             "GetObjectHandles",
-            session::OP_GET_OBJECT_HANDLES,
-            &[storage, 0, ptp_proto::association::EVERY_OBJECT],
+            op::GET_OBJECT_HANDLES,
+            &[storage, 0, association::EVERY_OBJECT],
         )
         .map_err(|e| format!("{e}"))?;
     let handles: Vec<u32> = list
-        .data
-        .get(4..)
-        .unwrap_or(&[])
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+        .as_u32_array()
+        .map_err(|e| format!("GetObjectHandles: {e}"))?;
 
     let mut files: Vec<(u32, u32, String)> = Vec::new();
     for h in handles.iter().take(BENCH_SEARCH) {
         let out = s
-            .operation("GetObjectInfo", session::OP_GET_OBJECT_INFO, &[*h])
+            .operation("GetObjectInfo", op::GET_OBJECT_INFO, &[*h])
             .map_err(|e| format!("{e}"))?;
         if let Ok(i) = ObjectInfo::parse(&out.data) {
             if !i.is_folder() && i.compressed_size > 0 {
@@ -744,7 +757,11 @@ fn bench() -> Result<(), String> {
 
     for (handle, size, _) in &chosen {
         for read_size in BENCH_READ_SIZES {
-            std::env::set_var("BSDROID_READ_BUFFER", read_size.to_string());
+            // An earlier version wrote the size into the environment of the
+            // process for each row, and the session read the variable back on
+            // every transfer. A write to the environment is not sound next to
+            // a thread, and the value belongs to the session.
+            s.set_read_buffer(read_size);
 
             let mut best_rate = 0.0f64;
             let mut reads = 0usize;
@@ -752,8 +769,7 @@ fn bench() -> Result<(), String> {
 
             for _ in 0..BENCH_ROUNDS {
                 let mut sink = std::io::sink();
-                match s.operation_stream("GetObject", session::OP_GET_OBJECT, &[*handle], &mut sink)
-                {
+                match s.operation_stream("GetObject", op::GET_OBJECT, &[*handle], &mut sink) {
                     Ok(o) => {
                         let secs = o.elapsed.as_secs_f64();
                         let rate = if secs > 0.0 {
@@ -795,7 +811,6 @@ fn bench() -> Result<(), String> {
             }
         }
     }
-    std::env::remove_var("BSDROID_READ_BUFFER");
 
     println!();
     println!("--- How to read this ---");
@@ -874,11 +889,10 @@ fn caps() -> Result<(), String> {
     let channels = open
         .open_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let mut s = Session::new(channels, TIMEOUT);
-    s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
+    let (mut s, _) = start_session(channels, &iface, 1)?;
 
     let out = s
-        .operation("GetDeviceInfo", session::OP_GET_DEVICE_INFO, &[])
+        .operation("GetDeviceInfo", op::GET_DEVICE_INFO, &[])
         .map_err(|e| format!("{e}"))?;
     // BSDROID_DEBUG prints the bytes. A fault report needs the bytes, and a
     // test fixture needs the bytes.
@@ -1024,9 +1038,7 @@ fn get(handle: Option<u32>) -> Result<(), String> {
     let channels = open
         .open_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let mut s = Session::new(channels, TIMEOUT);
-
-    s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
+    let (mut s, _) = start_session(channels, &iface, 1)?;
     let w = wait_for_storage(&mut s)?;
     if w.ids.is_empty() {
         report_no_storage(&w);
@@ -1039,7 +1051,7 @@ fn get(handle: Option<u32>) -> Result<(), String> {
     let (target, info) = match handle {
         Some(h) => {
             let out = s
-                .operation("GetObjectInfo", session::OP_GET_OBJECT_INFO, &[h])
+                .operation("GetObjectInfo", op::GET_OBJECT_INFO, &[h])
                 .map_err(|e| format!("{e}"))?;
             let info = ObjectInfo::parse(&out.data).map_err(|e| format!("{e}"))?;
             (h, info)
@@ -1050,22 +1062,18 @@ fn get(handle: Option<u32>) -> Result<(), String> {
             let list = s
                 .operation(
                     "GetObjectHandles",
-                    session::OP_GET_OBJECT_HANDLES,
-                    &[storage, 0, ptp_proto::association::EVERY_OBJECT],
+                    op::GET_OBJECT_HANDLES,
+                    &[storage, 0, association::EVERY_OBJECT],
                 )
                 .map_err(|e| format!("{e}"))?;
             let handles: Vec<u32> = list
-                .data
-                .get(4..)
-                .unwrap_or(&[])
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
+                .as_u32_array()
+                .map_err(|e| format!("GetObjectHandles: {e}"))?;
 
             let mut best: Option<(u32, ObjectInfo)> = None;
             for h in handles.iter().take(SEARCH_LIMIT) {
                 let out = s
-                    .operation("GetObjectInfo", session::OP_GET_OBJECT_INFO, &[*h])
+                    .operation("GetObjectInfo", op::GET_OBJECT_INFO, &[*h])
                     .map_err(|e| format!("{e}"))?;
                 let info = match ObjectInfo::parse(&out.data) {
                     Ok(i) => i,
@@ -1115,7 +1123,7 @@ fn get(handle: Option<u32>) -> Result<(), String> {
     let mut writer = std::io::BufWriter::new(file);
 
     let out = s
-        .operation_stream("GetObject", session::OP_GET_OBJECT, &[target], &mut writer)
+        .operation_stream("GetObject", op::GET_OBJECT, &[target], &mut writer)
         .map_err(|e| format!("{e}"))?;
 
     use std::io::Write as _;
@@ -1129,7 +1137,7 @@ fn get(handle: Option<u32>) -> Result<(), String> {
         return Err(format!(
             "GetObject gave {:#06x} {}",
             out.response_code,
-            response_name(out.response_code)
+            resp::name(out.response_code)
         ));
     }
 
@@ -1218,9 +1226,9 @@ fn wait_for_storage(s: &mut Session) -> Result<StorageWait, String> {
 
     for attempt in 1..=STORAGE_ATTEMPTS {
         let out = s
-            .operation("GetStorageIDs", session::OP_GET_STORAGE_IDS, &[])
+            .operation("GetStorageIDs", op::GET_STORAGE_IDS, &[])
             .map_err(|e| format!("{e}"))?;
-        let ids = storage_ids_from(&out.data);
+        let ids = out.as_u32_array().map_err(|e| format!("{e}"))?;
 
         if !ids.is_empty() {
             return Ok(StorageWait {
@@ -1349,8 +1357,7 @@ fn coldstart() -> Result<(), String> {
     let channels = open
         .open_mtp(&iface, BULK_BUFFER)
         .map_err(|e| format!("cannot open the endpoints: {e}"))?;
-    let mut s = Session::new(channels, TIMEOUT);
-    s.open_session_or_repair(1).map_err(|e| format!("{e}"))?;
+    let (mut s, _) = start_session(channels, &iface, 1)?;
 
     let w = wait_for_storage(&mut s)?;
     let _ = s.close_session();
@@ -1386,7 +1393,7 @@ fn step(
     name: &'static str,
     code: u16,
     params: &[u32],
-) -> Result<session::Outcome, String> {
+) -> Result<mtp_session::Outcome, String> {
     let out = s
         .operation(name, code, params)
         .map_err(|e| format!("{e}"))?;
@@ -1395,7 +1402,7 @@ fn step(
         "    {name:<16} {:>6} ms   {:#06x} {}   {} data bytes",
         out.elapsed.as_millis(),
         out.response_code,
-        response_name(out.response_code),
+        resp::name(out.response_code),
         out.data.len()
     );
 
@@ -1403,10 +1410,50 @@ fn step(
         return Err(format!(
             "{name} gave {:#06x} {}",
             out.response_code,
-            response_name(out.response_code)
+            resp::name(out.response_code)
         ));
     }
     Ok(out)
+}
+
+/// Tells the user how to repair the MTP service of the device.
+///
+/// The device answers `OpenSession` with "session already open", and the
+/// device does not answer `CloseSession`. The MTP service of the device holds
+/// a session, and the service does not release the session.
+///
+/// A cable disconnect does not repair this state. The USB connection starts
+/// again, and the service on the device keeps running.
+fn report_wedged_service() {
+    println!();
+    println!("    The device still reports an open session.");
+    println!();
+    println!("    What the host measured:");
+    println!("      - OpenSession answers, and the answer is 0x201e.");
+    println!("      - CloseSession gets no answer, and reaches the deadline.");
+    println!("      - A cable disconnect does not change the answers.");
+    println!();
+    println!("    The MTP service on the phone holds the session. The USB");
+    println!("    connection is not the cause, so a new cable connection does");
+    println!("    not help.");
+    println!();
+    println!("    Try a device reset request first:");
+    println!("      BSDROID_PTP_RESET=1 mtpprobe probe");
+    println!();
+    println!("    The request repairs some devices, and the request breaks");
+    println!("    others. See docs/06-the-reset-that-breaks.md.");
+    println!();
+    println!("    If the request does not help, restart the MTP service on the");
+    println!("    phone:");
+    println!("      1. Open the USB notification.");
+    println!("      2. Put the cellphone into charge only mode.");
+    println!("      3. Put the cellphone into file transfer mode again.");
+    println!();
+    println!("    The name of a mode is not the same on each cellphone. A");
+    println!("    cellphone writes `Charging phone only`, or `No data transfer`,");
+    println!("    or `Charge this device` for the first one.");
+    println!();
+    println!("    A restart of the phone also works, and takes longer.");
 }
 
 #[cfg(test)]

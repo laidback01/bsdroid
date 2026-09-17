@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+mtp-session = { path = "../mtp-session" }
 ptp-proto = { path = "../ptp-proto" }
 usb-freebsd = { path = "../usb-freebsd" }
 

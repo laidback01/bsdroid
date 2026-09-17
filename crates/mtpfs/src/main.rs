@@ -7,7 +7,7 @@
 use std::ffi::{CStr, CString};
 use std::sync::Mutex;
 
-use mtpfs::backend::Mtp;
+use mtpfs::backend::{Mtp, Settings};
 use mtpfs::tree::{Lookup, Tree, ROOT};
 
 #[allow(clippy::all)]
@@ -148,7 +148,10 @@ fn main() -> std::process::ExitCode {
     };
 
     println!("mtpfs: look for a device");
-    let mtp = match Mtp::open(node) {
+    // Read every setting one time, and not inside each transfer.
+    let settings = Settings::from_env();
+
+    let mtp = match Mtp::open(node, settings) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("mtpfs: {e}");
@@ -235,7 +238,7 @@ fn main() -> std::process::ExitCode {
 
 /// Writes one line for each device that gives an MTP interface.
 fn list_devices() -> std::process::ExitCode {
-    match Mtp::list_devices() {
+    match Mtp::list_devices(Settings::from_env()) {
         Ok(list) if list.is_empty() => {
             println!("No device gives an MTP interface.");
             println!();

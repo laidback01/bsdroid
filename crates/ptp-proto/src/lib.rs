@@ -232,7 +232,7 @@ impl<'a> Container<'a> {
     /// A PTP array starts with a `u32` element count. `GetStorageIDs` and
     /// `GetObjectHandles` both answer with this shape.
     pub fn payload_as_u32_array(&self) -> Result<Vec<u32>, ParseError> {
-        Reader::new(self.payload).read_u32_array("array")
+        parse_u32_array(self.payload)
     }
 
     /// Reads the payload as the parameters of a command or a response.
@@ -247,7 +247,27 @@ impl<'a> Container<'a> {
     }
 }
 
+/// Reads a PTP array of `u32` from the payload of a data container.
+///
+/// A PTP array starts with a `u32` element count, and the elements follow.
+/// `GetStorageIDs` and `GetObjectHandles` both answer with this shape.
+///
+/// The function checks the count against the buffer before it reserves
+/// memory, so a damaged count of 0xffffffff cannot make the host ask for
+/// 16 GiB.
+///
+/// An earlier version of this project hand-rolled this parse at five call
+/// sites, as `data.get(4..).chunks_exact(4)`. Each copy dropped the count
+/// instead of checking it against the bytes that followed.
+pub fn parse_u32_array(data: &[u8]) -> Result<Vec<u32>, ParseError> {
+    Reader::new(data).read_u32_array("array")
+}
+
 /// Writes a PTP string into a buffer.
+///
+/// The first byte holds the character count, and the count includes the
+/// terminator. The characters are UTF-16 little-endian. An empty string gives
+/// one byte of 0, and no characters.
 ///
 /// A caller outside this crate needs the function for the value of an object
 /// property, which is a string with no dataset around it.
@@ -762,6 +782,22 @@ impl ObjectInfo {
 /// A device does not support every operation. `GetDeviceInfo` gives the list,
 /// and the list decides the design of a filesystem.
 pub mod op {
+    /// Asks the device what it is, and what it can do.
+    pub const GET_DEVICE_INFO: u16 = 0x1001;
+    /// Starts a session. Every other operation needs an open session.
+    pub const OPEN_SESSION: u16 = 0x1002;
+    /// Ends a session.
+    pub const CLOSE_SESSION: u16 = 0x1003;
+    /// Lists the storages the device holds.
+    pub const GET_STORAGE_IDS: u16 = 0x1004;
+    /// Reads the size and the free space of one storage.
+    pub const GET_STORAGE_INFO: u16 = 0x1005;
+    /// Lists the objects of a folder.
+    pub const GET_OBJECT_HANDLES: u16 = 0x1007;
+    /// Reads the name, the size and the kind of one object.
+    pub const GET_OBJECT_INFO: u16 = 0x1008;
+    /// Reads a whole object. A filesystem needs a partial read instead.
+    pub const GET_OBJECT: u16 = 0x1009;
     /// Reads part of an object. A filesystem needs this operation, because a
     /// read asks for an offset and a length.
     pub const GET_PARTIAL_OBJECT: u16 = 0x101b;
@@ -792,42 +828,89 @@ pub mod op {
     pub const BEGIN_EDIT_OBJECT: u16 = 0x95c4;
 
     /// Gives a name for an operation code.
+    ///
+    /// The arms read the constants above, so one value has one place. A code
+    /// with no constant is one the project names but never sends.
     pub fn name(code: u16) -> &'static str {
         match code {
-            0x1001 => "GetDeviceInfo",
-            0x1002 => "OpenSession",
-            0x1003 => "CloseSession",
-            0x1004 => "GetStorageIDs",
-            0x1005 => "GetStorageInfo",
+            GET_DEVICE_INFO => "GetDeviceInfo",
+            OPEN_SESSION => "OpenSession",
+            CLOSE_SESSION => "CloseSession",
+            GET_STORAGE_IDS => "GetStorageIDs",
+            GET_STORAGE_INFO => "GetStorageInfo",
             0x1006 => "GetNumObjects",
-            0x1007 => "GetObjectHandles",
-            0x1008 => "GetObjectInfo",
-            0x1009 => "GetObject",
+            GET_OBJECT_HANDLES => "GetObjectHandles",
+            GET_OBJECT_INFO => "GetObjectInfo",
+            GET_OBJECT => "GetObject",
             0x100a => "GetThumb",
-            0x100b => "DeleteObject",
-            0x100c => "SendObjectInfo",
-            0x100d => "SendObject",
+            DELETE_OBJECT => "DeleteObject",
+            SEND_OBJECT_INFO => "SendObjectInfo",
+            SEND_OBJECT => "SendObject",
             0x1014 => "GetDevicePropDesc",
             0x1015 => "GetDevicePropValue",
             0x1016 => "SetDevicePropValue",
-            0x1019 => "MoveObject",
-            0x101a => "CopyObject",
-            0x101b => "GetPartialObject",
-            0x101c => "TruncateObject",
-            0x9801 => "GetObjectPropsSupported",
+            MOVE_OBJECT => "MoveObject",
+            COPY_OBJECT => "CopyObject",
+            GET_PARTIAL_OBJECT => "GetPartialObject",
+            TRUNCATE_OBJECT => "TruncateObject",
+            GET_OBJECT_PROPS_SUPPORTED => "GetObjectPropsSupported",
             0x9802 => "GetObjectPropDesc",
             0x9803 => "GetObjectPropValue",
-            0x9804 => "SetObjectPropValue",
-            0x9805 => "GetObjectPropList",
+            SET_OBJECT_PROP_VALUE => "SetObjectPropValue",
+            GET_OBJECT_PROP_LIST => "GetObjectPropList",
             0x9806 => "SetObjectPropList",
             0x9808 => "SendObjectPropList",
             0x9810 => "GetObjectReferences",
             0x9811 => "SetObjectReferences",
-            0x95c1 => "GetPartialObject64",
-            0x95c2 => "SendPartialObject",
+            GET_PARTIAL_OBJECT_64 => "GetPartialObject64",
+            SEND_PARTIAL_OBJECT => "SendPartialObject",
             0x95c3 => "TruncateObject64",
-            0x95c4 => "BeginEditObject",
+            BEGIN_EDIT_OBJECT => "BeginEditObject",
             0x95c5 => "EndEditObject",
+            _ => "unknown",
+        }
+    }
+}
+
+/// Response codes a device sends.
+///
+/// The device answers every operation with one of these. `OK` is the only
+/// value that means the operation happened.
+pub mod resp {
+    /// The operation happened.
+    pub const OK: u16 = 0x2001;
+    /// A session from an earlier program is still open on the device.
+    ///
+    /// A program that stops without `CloseSession` leaves this state. The
+    /// repair is to close the old session and open a new one.
+    pub const SESSION_ALREADY_OPEN: u16 = 0x201e;
+    /// The device holds no open session, so it refuses the operation.
+    pub const SESSION_NOT_OPEN: u16 = 0x2003;
+    /// The device does not support the operation.
+    pub const OPERATION_NOT_SUPPORTED: u16 = 0x2005;
+    /// The storage holds no more room.
+    pub const STORE_FULL: u16 = 0x200d;
+    /// The object handle names no object.
+    pub const INVALID_OBJECT_HANDLE: u16 = 0x2009;
+
+    /// Gives a name for a response code.
+    pub fn name(code: u16) -> &'static str {
+        match code {
+            OK => "OK",
+            0x2002 => "General error",
+            SESSION_NOT_OPEN => "Session not open",
+            0x2004 => "Invalid transaction id",
+            OPERATION_NOT_SUPPORTED => "Operation not supported",
+            0x2006 => "Parameter not supported",
+            0x2007 => "Incomplete transfer",
+            0x2008 => "Invalid storage id",
+            INVALID_OBJECT_HANDLE => "Invalid object handle",
+            STORE_FULL => "Store full",
+            0x2013 => "Store not available",
+            0x200a => "Object write protected",
+            0x200f => "Access denied",
+            SESSION_ALREADY_OPEN => "Session already open",
+            0x201f => "Transaction cancelled",
             _ => "unknown",
         }
     }
@@ -837,7 +920,10 @@ pub mod op {
 ///
 /// `GetDeviceInfo` answers with this dataset. The list of operations decides
 /// what a filesystem on top of the device can do.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The default value holds no operation, so a caller that has not asked the
+/// device yet reports that the device can do nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeviceInfo {
     /// The version of the standard the device follows, times 100.
     pub standard_version: u16,

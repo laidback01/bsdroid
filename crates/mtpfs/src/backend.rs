@@ -4,32 +4,21 @@
 //! runs. A session costs about 46 milliseconds to open, and a filesystem does
 //! many operations, so one session is right. See `docs/07-filesystem-design.md`.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::time::Duration;
 
-use ptp_proto::{op, Container, ContainerType, DeviceInfo, Header, ObjectInfo, ParseError};
+use mtp_session::{Config, Session, SessionError};
+use ptp_proto::{association, op, prop, resp, DeviceInfo, ObjectInfo, ParseError};
 use usb_freebsd::descriptor::{ConfigDescriptor, MtpInterface};
-use usb_freebsd::device::{Backend as UsbBackend, MtpChannels, UsbError};
+use usb_freebsd::device::{Backend as UsbBackend, UsbError};
 
 use crate::tree::{Entry, ROOT};
 
 /// The deadline for one transfer.
-const TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Gives the deadline for one transfer.
 ///
-/// `BSDROID_TIMEOUT` holds a count of seconds, and gives a longer deadline for
-/// a slow device. `libmtp` holds a flag with the same purpose,
-/// `DEVICE_FLAG_LONG_TIMEOUT`.
-fn timeout() -> Duration {
-    match std::env::var("BSDROID_TIMEOUT") {
-        Ok(v) => match v.parse::<u64>() {
-            Ok(n) if n > 0 => Duration::from_secs(n),
-            _ => TIMEOUT,
-        },
-        Err(_) => TIMEOUT,
-    }
-}
+/// The value is longer than the deadline `mtpprobe` uses. A filesystem asks
+/// for a large read, and a slow device needs the time.
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The size of one read, in bytes.
 ///
@@ -54,61 +43,83 @@ const BULK_BUFFER: u32 = 1024 * 1024;
 const READ_AHEAD: usize = 4 * 1024 * 1024;
 
 /// The count of bytes the host writes in one transfer.
+///
+/// The MTP driver of an Android kernel holds a buffer of 16384 bytes, in
+/// `MTP_BULK_BUFFER_SIZE`.
 const WRITE_CHUNK: usize = 512 * 1024;
 
-/// Gives the count of bytes in one write to the device.
+/// What the user asked for, read one time at startup.
 ///
-/// `BSDROID_WRITE_CHUNK` holds the count, and gives a smaller write for a
-/// device that cannot take a large one. The MTP driver of an Android kernel
-/// holds a buffer of 16384 bytes, in `MTP_BULK_BUFFER_SIZE`.
-fn write_chunk() -> usize {
-    match std::env::var("BSDROID_WRITE_CHUNK") {
-        Ok(v) => match v.parse::<usize>() {
-            // The count must hold the header, and must be a whole number of
-            // USB packets.
-            Ok(n) if n > ptp_proto::HEADER_LEN && n % 512 == 0 => n,
-            _ => WRITE_CHUNK,
-        },
-        Err(_) => WRITE_CHUNK,
+/// An earlier version read each variable inside the function that needed it.
+/// `timeout()` therefore ran a lookup and a parse on every USB transfer, and
+/// `write_chunk()` ran one for every chunk of a copy. A copy of 4 GB paid for
+/// about 8000 of each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settings {
+    /// The deadline for one transfer.
+    pub timeout: Duration,
+    /// The count of payload bytes in one write to the device.
+    pub write_chunk: usize,
+    /// The host writes a line for each step it takes.
+    pub debug: bool,
+    /// The host uses the older listing, one request for each object.
+    pub no_proplist: bool,
+    /// The host sends a USB reset when the session closes.
+    pub usb_reset: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            timeout: TIMEOUT,
+            write_chunk: WRITE_CHUNK,
+            debug: false,
+            no_proplist: false,
+            usb_reset: false,
+        }
     }
 }
 
-/// The deadline for the first read of a drain, in milliseconds.
-const DRAIN_FIRST_MILLIS: u64 = 15;
+impl Settings {
+    /// Reads the settings from the environment.
+    ///
+    /// | Variable               | What it changes                        |
+    /// | ---------------------- | -------------------------------------- |
+    /// | `BSDROID_TIMEOUT`      | the deadline, in seconds               |
+    /// | `BSDROID_WRITE_CHUNK`  | the count of bytes in one write        |
+    /// | `BSDROID_DEBUG`        | write a line for each step             |
+    /// | `BSDROID_NO_PROPLIST`  | use the older listing                  |
+    /// | `BSDROID_USB_RESET`    | reset the device when the session ends |
+    ///
+    /// `libmtp` holds a flag with the same purpose as `BSDROID_TIMEOUT`,
+    /// which is `DEVICE_FLAG_LONG_TIMEOUT`.
+    pub fn from_env() -> Self {
+        let mut s = Self::default();
 
-/// The value that lists the root folder.
-///
-/// A device gives every object for 0x00000000, and the root folder for
-/// 0xffffffff. See `docs/03-object-handles.md`.
-const LIST_ROOT: u32 = 0xffff_ffff;
+        if let Some(n) = env_number("BSDROID_TIMEOUT") {
+            if n > 0 {
+                s.timeout = Duration::from_secs(n);
+            }
+        }
+        if let Some(n) = env_number("BSDROID_WRITE_CHUNK") {
+            // `Config::normalised` rounds the count to whole USB packets, so
+            // this code takes any count above zero.
+            if n > 0 {
+                s.write_chunk = n as usize;
+            }
+        }
 
-/// The packet size of a USB 2.0 bulk endpoint, in bytes.
-///
-/// A Samsung stops when the last packet of a partial read holds exactly this
-/// count of bytes. See `docs/07-filesystem-design.md`.
-const USB2_PACKET: u64 = 512;
+        s.debug = std::env::var_os("BSDROID_DEBUG").is_some();
+        s.no_proplist = std::env::var_os("BSDROID_NO_PROPLIST").is_some();
+        s.usb_reset = std::env::var_os("BSDROID_USB_RESET").is_some();
+        s
+    }
+}
 
-/// Operation codes the filesystem sends.
-const OP_OPEN_SESSION: u16 = 0x1002;
-const OP_CLOSE_SESSION: u16 = 0x1003;
-const OP_GET_STORAGE_IDS: u16 = 0x1004;
-const OP_GET_OBJECT_HANDLES: u16 = 0x1007;
-const OP_GET_OBJECT_INFO: u16 = 0x1008;
-const OP_GET_DEVICE_INFO: u16 = 0x1001;
-const OP_SEND_OBJECT_INFO: u16 = 0x100c;
-const OP_SEND_OBJECT: u16 = 0x100d;
-const OP_DELETE_OBJECT: u16 = 0x100b;
-const OP_MOVE_OBJECT: u16 = 0x1019;
-const OP_GET_STORAGE_INFO: u16 = 0x1005;
-const OP_SET_OBJECT_PROP_VALUE: u16 = 0x9804;
-
-/// The object property that holds the name of a file.
-const PROP_OBJECT_FILE_NAME: u16 = 0xdc07;
-
-/// Response code for success.
-const RESP_OK: u16 = 0x2001;
-/// Response code for a session that is already open.
-const RESP_SESSION_ALREADY_OPEN: u16 = 0x201e;
+/// Reads a whole number from an environment variable.
+fn env_number(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.parse().ok()
+}
 
 /// A fault the filesystem reports.
 #[derive(Debug)]
@@ -119,6 +130,8 @@ pub enum Error {
     Usb(UsbError),
     /// A dataset does not parse.
     Parse(ParseError),
+    /// A USB descriptor does not parse.
+    Descriptor(usb_freebsd::descriptor::DescriptorError),
     /// The device answered with a fault code.
     Device { step: &'static str, code: u16 },
     /// The device gives no storage.
@@ -135,12 +148,11 @@ pub enum Error {
     TooLarge { size: u64 },
     /// The fast listing gave an object with no name.
     BadListing { handle: u32 },
-    /// The host read fewer bytes than the host promised the device.
-    ShortRead {
-        step: &'static str,
-        want: u64,
-        got: u64,
-    },
+    /// An operation on the session failed.
+    ///
+    /// The session layer names the step and carries the cause, so this
+    /// variant needs no fields of its own.
+    Session(SessionError),
 }
 
 impl std::fmt::Display for Error {
@@ -154,6 +166,7 @@ impl std::fmt::Display for Error {
             ),
             Self::Usb(e) => write!(f, "{e}"),
             Self::Parse(e) => write!(f, "{e}"),
+            Self::Descriptor(e) => write!(f, "the descriptor does not parse: {e}"),
             Self::Device { step, code } => {
                 write!(f, "{step}: the device answered with the code {code:#06x}")
             }
@@ -179,9 +192,7 @@ impl std::fmt::Display for Error {
                 "the file holds {size} bytes, and MTP allows {} at most",
                 ptp_proto::MAX_PAYLOAD_LEN
             ),
-            Self::ShortRead { step, want, got } => {
-                write!(f, "{step}: the host promised {want} bytes and read {got}")
-            }
+            Self::Session(e) => write!(f, "{e}"),
             Self::NoPartialRead => write!(
                 f,
                 "the device cannot read part of a file, and a filesystem needs \
@@ -206,9 +217,29 @@ impl From<ptp_proto::PayloadTooLarge> for Error {
         Self::TooLarge { size: e.len }
     }
 }
+impl From<SessionError> for Error {
+    fn from(e: SessionError) -> Self {
+        Self::Session(e)
+    }
+}
 impl From<usb_freebsd::descriptor::DescriptorError> for Error {
-    fn from(_: usb_freebsd::descriptor::DescriptorError) -> Self {
-        Self::NoDevice
+    fn from(e: usb_freebsd::descriptor::DescriptorError) -> Self {
+        // An earlier version turned every descriptor fault into NoDevice. A
+        // damaged descriptor and an absent cellphone then gave one message,
+        // and the message named the wrong cause.
+        Self::Descriptor(e)
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Usb(e) => Some(e),
+            Self::Parse(e) => Some(e),
+            Self::Session(e) => Some(e),
+            Self::Descriptor(e) => Some(e),
+            _ => None,
+        }
     }
 }
 
@@ -239,15 +270,6 @@ pub fn drop_the_folder(
     records.into_iter().filter(|r| r.handle != folder).collect()
 }
 
-/// Says whether a data phase needs a packet of zero bytes at the end.
-///
-/// A device counts packets. A last packet that is full tells the device that
-/// more bytes follow, and the device then waits. A packet of zero bytes tells
-/// the device that the data phase is complete.
-pub fn needs_zero_packet(total: u64, packet: u64) -> bool {
-    packet != 0 && total % packet == 0
-}
-
 /// Splits a read that reaches the end of a file.
 ///
 /// The answer holds the count for the first read, and a flag. The flag is true
@@ -257,41 +279,14 @@ pub fn needs_zero_packet(total: u64, packet: u64) -> bool {
 /// full packet, and the read reaches the end of the file. The workaround takes
 /// one byte from the first read, and a second read takes that byte.
 pub fn split_final_read(offset: u64, want: u64, file_size: u64, packet: u64) -> (u64, bool) {
-    let reaches_end = offset + want >= file_size;
+    // The offset and the count both come from FUSE. A sum that wraps would
+    // panic, because the release profile keeps the overflow checks on.
+    let reaches_end = offset.saturating_add(want) >= file_size;
     if reaches_end && packet != 0 && want != 0 && want % packet == 0 {
         (want - 1, true)
     } else {
         (want, false)
     }
-}
-
-/// Fills a buffer from a reader, and reports a short read.
-fn read_exact_or_short<R: Read>(
-    reader: &mut R,
-    buf: &mut [u8],
-    step: &'static str,
-) -> Result<(), Error> {
-    let mut done = 0;
-    while done < buf.len() {
-        match reader.read(&mut buf[done..]) {
-            Ok(0) => {
-                return Err(Error::ShortRead {
-                    step,
-                    want: buf.len() as u64,
-                    got: done as u64,
-                })
-            }
-            Ok(n) => done += n,
-            Err(_) => {
-                return Err(Error::ShortRead {
-                    step,
-                    want: buf.len() as u64,
-                    got: done as u64,
-                })
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Reads a node name, and gives the bus and the address.
@@ -329,12 +324,12 @@ impl ReadCache {
 
 /// The session a mount holds open.
 pub struct Mtp {
-    // The order of the fields sets the order of the drop. The channels must
+    // The order of the fields sets the order of the drop. The session must
     // close before the device, and the device before the backend.
-    channels: MtpChannels<'static>,
+    session: Session<'static>,
     _device: Box<usb_freebsd::device::OpenDevice<'static>>,
     _backend: Box<UsbBackend>,
-    transaction: u32,
+    settings: Settings,
     storage: u32,
     /// The operation code the device uses for a partial read.
     partial_read: u16,
@@ -345,9 +340,9 @@ pub struct Mtp {
     fast_list: bool,
     /// The largest packet the bulk endpoints accept, in bytes.
     ///
-    /// A data phase that is a multiple of this count needs a packet of zero
-    /// bytes at the end. The count is 512 at high speed, and 1024 at super
-    /// speed.
+    /// A partial read that ends on a multiple of this count needs the
+    /// workaround in [`split_final_read`]. The count is 512 at high speed, and
+    /// 1024 at super speed.
     packet: u64,
     /// The bytes the host read in advance.
     cache: Option<ReadCache>,
@@ -360,7 +355,7 @@ impl Mtp {
     ///
     /// The function gives the node name, the identifiers and the name of the
     /// maker, for a person to read.
-    pub fn list_devices() -> Result<Vec<DeviceEntry>, Error> {
+    pub fn list_devices(settings: Settings) -> Result<Vec<DeviceEntry>, Error> {
         let backend = UsbBackend::new()?;
         let mut out = Vec::new();
 
@@ -373,7 +368,7 @@ impl Mtp {
                 Ok(o) => o,
                 Err(_) => continue,
             };
-            let raw = match open.config_descriptor_raw(timeout()) {
+            let raw = match open.config_descriptor_raw(settings.timeout) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -419,7 +414,7 @@ impl Mtp {
     ///
     /// The function gives an error when the device cannot read part of a file,
     /// because a filesystem cannot work without that operation.
-    pub fn open(node: Option<&str>) -> Result<Self, Error> {
+    pub fn open(node: Option<&str>, settings: Settings) -> Result<Self, Error> {
         let want = match node {
             Some(n) => Some(parse_node(n).ok_or_else(|| Error::BadNode(n.to_string()))?),
             None => None,
@@ -442,7 +437,7 @@ impl Mtp {
                 Ok(o) => o,
                 Err(_) => continue,
             };
-            let raw = match open.config_descriptor_raw(timeout()) {
+            let raw = match open.config_descriptor_raw(settings.timeout) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -488,49 +483,62 @@ impl Mtp {
             unsafe { &mut *(&mut *device as *mut _) };
         let channels = device_ref.open_mtp(&iface, BULK_BUFFER)?;
 
+        let config = Config {
+            timeout: settings.timeout,
+            read_buffer: READ_BUFFER,
+            write_chunk: settings.write_chunk,
+            packet: u64::from(iface.max_packet_size),
+        }
+        .normalised();
+
+        // The session clears the endpoints and drops what an earlier program
+        // left behind.
+        let (session, dropped) = Session::new(channels, config);
+        if settings.debug && dropped > 0 {
+            eprintln!("mtpfs: the device still held {dropped} bytes, and the host dropped them");
+        }
+
         let mut m = Self {
-            channels,
+            session,
             _device: device,
             _backend: backend,
-            transaction: 0,
+            settings,
             storage: 0,
             partial_read: op::GET_PARTIAL_OBJECT,
             fast_list: false,
-            packet: if iface.max_packet_size == 0 {
-                USB2_PACKET
-            } else {
-                iface.max_packet_size as u64
-            },
+            packet: config.packet,
             cache: None,
-            info: DeviceInfo {
-                standard_version: 0,
-                vendor_extension_id: 0,
-                vendor_extension_version: 0,
-                vendor_extension_desc: String::new(),
-                operations_supported: Vec::new(),
-                events_supported: Vec::new(),
-                device_properties_supported: Vec::new(),
-                capture_formats: Vec::new(),
-                image_formats: Vec::new(),
-                manufacturer: String::new(),
-                model: String::new(),
-                device_version: String::new(),
-                serial_number: String::new(),
-            },
+            info: DeviceInfo::default(),
         };
 
-        m.drain();
-        m.open_session()?;
+        // A program that stopped without a CloseSession leaves a session open
+        // on the device. The mount closes it and opens a new one, so a user
+        // does not need to pull the cable.
+        let opened = m.session.open_session_or_repair(1)?;
+        if opened.wedged {
+            eprintln!(
+                "mtpfs: the device still reports an open session. Put the \
+                 cellphone into charge only mode, and then into file transfer \
+                 mode again"
+            );
+        } else if opened.repaired && m.settings.debug {
+            eprintln!("mtpfs: closed a session that an earlier program left open");
+        }
+        if !opened.outcome.is_ok() {
+            return Err(Error::Device {
+                step: "OpenSession",
+                code: opened.outcome.response_code,
+            });
+        }
 
-        let raw = m.operation("GetDeviceInfo", OP_GET_DEVICE_INFO, &[])?;
+        let raw = m.operation("GetDeviceInfo", op::GET_DEVICE_INFO, &[])?;
         m.info = DeviceInfo::parse(&raw)?;
 
         // A 64 bit offset is right for a large file, and both test devices
         // give the operation.
         // `BSDROID_NO_PROPLIST=1` turns the fast listing off. The switch gives
         // a way to compare the two ways on one device.
-        m.fast_list = m.info.supports(op::GET_OBJECT_PROP_LIST)
-            && std::env::var_os("BSDROID_NO_PROPLIST").is_none();
+        m.fast_list = m.info.supports(op::GET_OBJECT_PROP_LIST) && !m.settings.no_proplist;
 
         m.partial_read = if m.info.supports(op::GET_PARTIAL_OBJECT_64) {
             op::GET_PARTIAL_OBJECT_64
@@ -648,10 +656,14 @@ impl Mtp {
     ///
     /// The root needs the value 0xffffffff, and a folder needs its own handle.
     fn list_one_at_a_time(&mut self, parent: u32) -> Result<Vec<Entry>, Error> {
-        let arg = if parent == ROOT { LIST_ROOT } else { parent };
+        let arg = if parent == ROOT {
+            association::ROOT_ONLY
+        } else {
+            parent
+        };
         let data = self.operation(
             "GetObjectHandles",
-            OP_GET_OBJECT_HANDLES,
+            op::GET_OBJECT_HANDLES,
             &[self.storage, 0, arg],
         )?;
 
@@ -664,7 +676,7 @@ impl Mtp {
 
         let mut out = Vec::with_capacity(handles.len());
         for h in handles {
-            let raw = self.operation("GetObjectInfo", OP_GET_OBJECT_INFO, &[h])?;
+            let raw = self.operation("GetObjectInfo", op::GET_OBJECT_INFO, &[h])?;
             let info = match ObjectInfo::parse(&raw) {
                 Ok(i) => i,
                 Err(_) => continue,
@@ -836,45 +848,39 @@ impl Mtp {
         // GetObjectHandles takes.
         let parent_arg = if parent == ROOT { 0xffff_ffff } else { parent };
 
-        let (code, resp) = self.operation_with_data(
-            "SendObjectInfo",
-            OP_SEND_OBJECT_INFO,
-            &[self.storage, parent_arg],
-            &info,
-        )?;
-        if code != RESP_OK {
-            return Err(Error::Device {
-                step: "SendObjectInfo",
-                code,
-            });
-        }
-
-        // The device answers with the storage, the parent and the new handle.
-        let handle = resp.get(2).copied().ok_or(Error::Device {
-            step: "SendObjectInfo",
-            code,
-        })?;
+        let handle = self.announce_object(&info, parent_arg)?;
 
         // A folder needs no second operation.
         if is_folder {
-            self.cache = None;
             return Ok(handle);
         }
 
-        let (code, _) = self.operation_with_data("SendObject", OP_SEND_OBJECT, &[], data)?;
-        if code != RESP_OK {
-            return Err(Error::Device {
-                step: "SendObject",
-                code,
-            });
-        }
-        self.cache = None;
+        self.sending_data("SendObject", op::SEND_OBJECT, &[], data)?;
         Ok(handle)
+    }
+
+    /// Sends `SendObjectInfo`, and gives the handle the device assigns.
+    ///
+    /// The host must announce an object before it sends the bytes. Both the
+    /// buffered write and the streamed write start here.
+    fn announce_object(&mut self, info: &[u8], parent_arg: u32) -> Result<u32, Error> {
+        let params = self.sending_data(
+            "SendObjectInfo",
+            op::SEND_OBJECT_INFO,
+            &[self.storage, parent_arg],
+            info,
+        )?;
+
+        // The device answers with the storage, the parent and the new handle.
+        params.get(2).copied().ok_or(Error::Device {
+            step: "SendObjectInfo",
+            code: resp::OK,
+        })
     }
 
     /// Reads the size and the free space of the storage.
     pub fn storage_info(&mut self) -> Result<(u64, u64), Error> {
-        let data = self.operation("GetStorageInfo", OP_GET_STORAGE_INFO, &[self.storage])?;
+        let data = self.operation("GetStorageInfo", op::GET_STORAGE_INFO, &[self.storage])?;
         let info = ptp_proto::StorageInfo::parse(&data)?;
         Ok((info.max_capacity, info.free_space_in_bytes))
     }
@@ -885,19 +891,12 @@ impl Mtp {
         let mut payload = Vec::new();
         ptp_proto::push_ptp_string(&mut payload, name);
 
-        let (code, _) = self.operation_with_data(
+        self.sending_data(
             "SetObjectPropValue",
-            OP_SET_OBJECT_PROP_VALUE,
-            &[handle, u32::from(PROP_OBJECT_FILE_NAME)],
+            op::SET_OBJECT_PROP_VALUE,
+            &[handle, u32::from(prop::OBJECT_FILE_NAME)],
             &payload,
         )?;
-        if code != RESP_OK {
-            return Err(Error::Device {
-                step: "SetObjectPropValue",
-                code,
-            });
-        }
-        self.cache = None;
         Ok(())
     }
 
@@ -908,29 +907,22 @@ impl Mtp {
         } else {
             new_parent
         };
-        let (code, _) = self.operation_code(
+        self.operation_that_changes(
             "MoveObject",
-            OP_MOVE_OBJECT,
+            op::MOVE_OBJECT,
             &[handle, self.storage, parent_arg],
         )?;
-        if code != RESP_OK {
-            return Err(Error::Device {
-                step: "MoveObject",
-                code,
-            });
-        }
-        self.cache = None;
         Ok(())
     }
 
     /// Tells you if the device can give an object a new name.
     pub fn can_rename(&self) -> bool {
-        self.info.supports(OP_SET_OBJECT_PROP_VALUE)
+        self.info.supports(op::SET_OBJECT_PROP_VALUE)
     }
 
     /// Tells you if the device can move an object to another folder.
     pub fn can_move(&self) -> bool {
-        self.info.supports(OP_MOVE_OBJECT)
+        self.info.supports(op::MOVE_OBJECT)
     }
 
     /// Writes a new object, and reads the bytes from a reader.
@@ -962,199 +954,91 @@ impl Mtp {
 
         let parent_arg = if parent == ROOT { 0xffff_ffff } else { parent };
 
-        let (code, resp) = self.operation_with_data(
-            "SendObjectInfo",
-            OP_SEND_OBJECT_INFO,
-            &[self.storage, parent_arg],
-            &info,
-        )?;
-        if code != RESP_OK {
-            return Err(Error::Device {
-                step: "SendObjectInfo",
-                code,
-            });
-        }
-        let handle = resp.get(2).copied().ok_or(Error::Device {
-            step: "SendObjectInfo",
-            code,
-        })?;
+        let handle = self.announce_object(&info, parent_arg)?;
 
-        let (code, _) =
-            self.operation_with_reader("SendObject", OP_SEND_OBJECT, &[], reader, size)?;
-        if code != RESP_OK {
+        let out =
+            self.session
+                .operation_sending("SendObject", op::SEND_OBJECT, &[], reader, size)?;
+        self.cache = None;
+        if !out.is_ok() {
             return Err(Error::Device {
                 step: "SendObject",
-                code,
+                code: out.response_code,
             });
         }
-        self.cache = None;
         Ok(handle)
-    }
-
-    /// Does one operation, and reads the data phase from a reader.
-    ///
-    /// The function holds one buffer, and not the whole payload.
-    fn operation_with_reader<R: Read>(
-        &mut self,
-        step: &'static str,
-        code: u16,
-        params: &[u32],
-        reader: &mut R,
-        size: u64,
-    ) -> Result<(u16, Vec<u32>), Error> {
-        let tid = self.transaction;
-        self.transaction = self.transaction.wrapping_add(1);
-
-        let command = ptp_proto::build_command(code, tid, params);
-        self.channels.write.write(&command, timeout())?;
-
-        // The first write holds the header, and the start of the payload.
-        let total = ptp_proto::container_length(size)?;
-        let mut first = ptp_proto::build_data_header(code, tid, size)?;
-
-        let mut buf = vec![0u8; write_chunk()];
-        let room = write_chunk() - ptp_proto::HEADER_LEN;
-        let want = core::cmp::min(room as u64, size) as usize;
-        read_exact_or_short(reader, &mut buf[..want], step)?;
-        first.extend_from_slice(&buf[..want]);
-        self.channels.write.write(&first, timeout())?;
-
-        let mut sent = want as u64;
-
-        // The loop has a bound that comes from the size, so the loop stops.
-        let rounds = size / write_chunk() as u64 + 4;
-        for _ in 0..rounds {
-            if sent >= size {
-                break;
-            }
-            let want = core::cmp::min(write_chunk() as u64, size - sent) as usize;
-            read_exact_or_short(reader, &mut buf[..want], step)?;
-            self.channels.write.write(&buf[..want], timeout())?;
-            sent += want as u64;
-        }
-
-        if sent < size {
-            return Err(Error::ShortRead {
-                step,
-                want: size,
-                got: sent,
-            });
-        }
-
-        // A data phase that ends on a packet boundary needs a packet of zero
-        // bytes. The device counts packets, and a full last packet tells the
-        // device that more bytes follow. The device then waits, and the
-        // transfer stops.
-        //
-        // A file of 524276 bytes gives a data phase of 524288 bytes, which is
-        // 1024 packets of 512 bytes. That file stopped the device before this
-        // code.
-        if needs_zero_packet(total as u64, self.packet) {
-            self.channels.write.write(&[], timeout())?;
-        }
-
-        let mut rbuf = vec![0u8; READ_BUFFER];
-        let n = self.channels.read.read(&mut rbuf, timeout())?;
-        let c = Container::parse(&rbuf[..n])?;
-        Ok((c.code, c.parameters()))
     }
 
     /// Removes an object from the device.
     pub fn delete_object(&mut self, handle: u32) -> Result<(), Error> {
-        let (code, _) = self.operation_code("DeleteObject", OP_DELETE_OBJECT, &[handle, 0])?;
-        if code != RESP_OK {
-            return Err(Error::Device {
-                step: "DeleteObject",
-                code,
-            });
-        }
-        self.cache = None;
+        self.operation_that_changes("DeleteObject", op::DELETE_OBJECT, &[handle, 0])?;
         Ok(())
     }
 
-    /// Does one operation that sends a data phase.
+    /// Does one operation, and gives the payload of the data phase.
     ///
-    /// The steps:
+    /// The function turns a fault code from the device into an error, because
+    /// almost every caller wants the payload and nothing else.
+    fn operation(
+        &mut self,
+        step: &'static str,
+        code: u16,
+        params: &[u32],
+    ) -> Result<Vec<u8>, Error> {
+        let out = self.session.operation(step, code, params)?;
+        if !out.is_ok() {
+            return Err(Error::Device {
+                step,
+                code: out.response_code,
+            });
+        }
+        Ok(out.data)
+    }
+
+    /// Does one operation that changes the device, and checks the answer.
     ///
-    /// 1. Send the command container.
-    /// 2. Send the data container, which holds the header and the payload.
-    /// 3. Read the response container.
+    /// A change makes the listing of a folder old, so the function drops the
+    /// read cache. An earlier version repeated that line at each call site,
+    /// and one call site forgot it.
+    fn operation_that_changes(
+        &mut self,
+        step: &'static str,
+        code: u16,
+        params: &[u32],
+    ) -> Result<Vec<u32>, Error> {
+        let out = self.session.operation(step, code, params)?;
+        self.cache = None;
+        if !out.is_ok() {
+            return Err(Error::Device {
+                step,
+                code: out.response_code,
+            });
+        }
+        Ok(out.response_params)
+    }
+
+    /// Does one operation that sends a dataset and changes the device.
     ///
-    /// The function gives the response code and the parameters of the
-    /// response.
-    fn operation_with_data(
+    /// The function gives the parameters of the response, which is where
+    /// `SendObjectInfo` puts the handle of the new object.
+    fn sending_data(
         &mut self,
         step: &'static str,
         code: u16,
         params: &[u32],
         payload: &[u8],
-    ) -> Result<(u16, Vec<u32>), Error> {
-        let tid = self.transaction;
-        self.transaction = self.transaction.wrapping_add(1);
-
-        let command = ptp_proto::build_command(code, tid, params);
-        self.channels.write.write(&command, timeout())?;
-
-        // The data container holds the header and the payload. A large payload
-        // goes in parts, because one transfer has a limit.
-        let total = ptp_proto::container_length(payload.len() as u64)?;
-        let mut first = ptp_proto::build_data_header(code, tid, payload.len() as u64)?;
-
-        // The first write holds the header and as much payload as fits.
-        let room = write_chunk() - ptp_proto::HEADER_LEN;
-        let take = core::cmp::min(room, payload.len());
-        first.extend_from_slice(&payload[..take]);
-        self.channels.write.write(&first, timeout())?;
-
-        let mut sent = take;
-        while sent < payload.len() {
-            let end = core::cmp::min(sent + write_chunk(), payload.len());
-            self.channels.write.write(&payload[sent..end], timeout())?;
-            sent = end;
-        }
-
-        // A data phase that ends on a packet boundary needs a packet of zero
-        // bytes. The device counts packets, and a full last packet tells the
-        // device that more bytes follow. The device then waits, and the
-        // transfer stops.
-        //
-        // A file of 524276 bytes gives a data phase of 524288 bytes, which is
-        // 1024 packets of 512 bytes. That file stopped the device before this
-        // code.
-        if needs_zero_packet(total as u64, self.packet) {
-            self.channels.write.write(&[], timeout())?;
-        }
-
-        // Read the response.
-        let mut buf = vec![0u8; READ_BUFFER];
-        let n = self.channels.read.read(&mut buf, timeout())?;
-        let c = Container::parse(&buf[..n])?;
-        if c.kind != ContainerType::Response {
-            return Err(Error::Device { step, code: c.code });
-        }
-        Ok((c.code, c.parameters()))
-    }
-
-    /// Sends `OpenSession`, and repairs a session an earlier program left.
-    fn open_session(&mut self) -> Result<(), Error> {
-        let (code, _) = self.operation_code("OpenSession", OP_OPEN_SESSION, &[1])?;
-        if code == RESP_SESSION_ALREADY_OPEN {
-            let _ = self.operation_code("CloseSession", OP_CLOSE_SESSION, &[]);
-            self.drain();
-            let (code, _) = self.operation_code("OpenSession", OP_OPEN_SESSION, &[1])?;
-            if code != RESP_OK {
-                return Err(Error::Device {
-                    step: "OpenSession",
-                    code,
-                });
-            }
-        } else if code != RESP_OK {
+    ) -> Result<Vec<u32>, Error> {
+        let out = self
+            .session
+            .operation_with_data(step, code, params, payload)?;
+        self.cache = None;
+        if !out.is_ok() {
             return Err(Error::Device {
-                step: "OpenSession",
-                code,
+                step,
+                code: out.response_code,
             });
         }
-        Ok(())
+        Ok(out.response_params)
     }
 
     /// Reads the identifier of the first storage.
@@ -1162,7 +1046,7 @@ impl Mtp {
         // A device can answer with no storage for a short time after a
         // connect. The loop asks again. See `docs/01-cold-start.md`.
         for attempt in 1..=10 {
-            let data = self.operation("GetStorageIDs", OP_GET_STORAGE_IDS, &[])?;
+            let data = self.operation("GetStorageIDs", op::GET_STORAGE_IDS, &[])?;
             if let Some(c) = data.get(4..8) {
                 return Ok(u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
             }
@@ -1172,95 +1056,17 @@ impl Mtp {
         }
         Err(Error::NoStorage)
     }
-
-    /// Does one operation, and gives the payload.
-    fn operation(
-        &mut self,
-        step: &'static str,
-        code: u16,
-        params: &[u32],
-    ) -> Result<Vec<u8>, Error> {
-        let (response, data) = self.operation_code(step, code, params)?;
-        if response != RESP_OK {
-            return Err(Error::Device {
-                step,
-                code: response,
-            });
-        }
-        Ok(data)
-    }
-
-    /// Does one operation, and gives the response code and the payload.
-    fn operation_code(
-        &mut self,
-        step: &'static str,
-        code: u16,
-        params: &[u32],
-    ) -> Result<(u16, Vec<u8>), Error> {
-        let tid = self.transaction;
-        self.transaction = self.transaction.wrapping_add(1);
-
-        let command = ptp_proto::build_command(code, tid, params);
-        self.channels.write.write(&command, timeout())?;
-
-        let mut data = Vec::new();
-        let mut buf = vec![0u8; READ_BUFFER];
-
-        let n = self.channels.read.read(&mut buf, timeout())?;
-        let first = Header::parse(&buf[..n])?;
-
-        let response = match first.kind {
-            ContainerType::Data => {
-                let declared = first.length as usize;
-                let start = core::cmp::min(n, ptp_proto::HEADER_LEN);
-                data.extend_from_slice(&buf[start..n]);
-                let mut have = n;
-
-                let rounds = declared / READ_BUFFER + 16;
-                for _ in 0..rounds {
-                    if have >= declared {
-                        break;
-                    }
-                    let more = self.channels.read.read(&mut buf, timeout())?;
-                    if more == 0 {
-                        break;
-                    }
-                    data.extend_from_slice(&buf[..more]);
-                    have += more;
-                }
-
-                let n2 = self.channels.read.read(&mut buf, timeout())?;
-                Container::parse(&buf[..n2])?.code
-            }
-            ContainerType::Response => first.code,
-            _ => {
-                return Err(Error::Device {
-                    step,
-                    code: first.code,
-                })
-            }
-        };
-        Ok((response, data))
-    }
-
-    /// Reads and drops the bytes the device still holds.
-    fn drain(&mut self) {
-        let mut buf = vec![0u8; READ_BUFFER];
-        let short = Duration::from_millis(DRAIN_FIRST_MILLIS);
-        self.channels.write.clear_stall();
-        self.channels.read.clear_stall();
-        for _ in 0..64 {
-            match self.channels.read.read(&mut buf, short) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
-    }
 }
 
 impl Drop for Mtp {
     fn drop(&mut self) {
-        let _ = self.operation_code("CloseSession", OP_CLOSE_SESSION, &[]);
+        // The PTP session must close before a USB reset reaches the port.
+        //
+        // This code runs before any field of `Mtp` drops, so `Session` has not
+        // closed itself yet. The close therefore happens here. `Session` also
+        // closes itself, and the second close does nothing once the first one
+        // succeeded.
+        let _ = self.session.close_session();
 
         // `BSDROID_USB_RESET=1` sends a USB reset when the session closes.
         //
@@ -1272,7 +1078,7 @@ impl Drop for Mtp {
         // A reset is not the PTP operation 0x66. A reset goes to the USB port,
         // and the device then starts again. The node name of the device can
         // change, so a caller who names a node must read the name again.
-        if std::env::var_os("BSDROID_USB_RESET").is_some() {
+        if self.settings.usb_reset {
             if let Err(e) = self._device.reset() {
                 eprintln!("mtpfs: the USB reset failed: {e}");
             }
@@ -1280,20 +1086,9 @@ impl Drop for Mtp {
     }
 }
 
-/// Writes nothing. The type gives `operation_stream` a writer it can drop.
-pub struct Sink;
-impl Write for Sink {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod packet_tests {
-    use super::{drop_the_folder, needs_zero_packet, split_final_read};
+    use super::{drop_the_folder, split_final_read};
 
     fn record(handle: u32, name: &str) -> ptp_proto::PropRecord {
         ptp_proto::PropRecord {
@@ -1316,28 +1111,6 @@ mod packet_tests {
         // The root uses the handle 0, and no object holds the handle 0.
         let recs = vec![record(1, "DCIM"), record(2, "Download")];
         assert_eq!(drop_the_folder(recs, 0).len(), 2);
-    }
-
-    #[test]
-    fn a_full_last_packet_needs_a_packet_of_zero_bytes() {
-        // A file of 524276 bytes gives a data phase of 524288 bytes, which is
-        // 1024 packets of 512 bytes. That size stopped a Samsung.
-        assert!(needs_zero_packet(524288, 512));
-        assert!(needs_zero_packet(512, 512));
-        assert!(needs_zero_packet(1024, 1024));
-    }
-
-    #[test]
-    fn a_part_packet_needs_no_packet_of_zero_bytes() {
-        // A file of 680397437 bytes gives 680397449, which is not a multiple.
-        assert!(!needs_zero_packet(680_397_449, 512));
-        assert!(!needs_zero_packet(1, 512));
-        assert!(!needs_zero_packet(513, 512));
-    }
-
-    #[test]
-    fn a_packet_size_of_zero_asks_for_no_packet() {
-        assert!(!needs_zero_packet(512, 0));
     }
 
     #[test]
