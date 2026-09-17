@@ -21,6 +21,24 @@ change a setting on the phone. The user does not enable developer mode.
 MTP needs no setup on the phone, so MTP is the transport for the product.
 `adb` needs developer mode, so the project uses `adb` only as a test reference.
 
+## Is this not built already?
+
+MTP over FUSE is not a new idea. FreeBSD ports hold three other programs that
+do it. The test system ran each one against the same telephone:
+
+| Program         | Mounts | 290 KB | 8 MB | 450 MB |
+| --------------- | ------ | ------ | ---- | ------ |
+| `simple-mtpfs`  | no     | no     | no   | no     |
+| `jmtpfs`        | no     | no     | no   | no     |
+| `aft-mtp-mount` | yes    | yes    | yes  | no     |
+| this project    | yes    | yes    | yes  | yes    |
+
+Each other program uses the `libusb-1.0` compatibility layer of FreeBSD, and
+that layer holds the fault. The FUSE part of this project is not new. The
+transport is.
+
+`docs/09-the-other-tools.md` holds the measurements.
+
 ## The approach
 
 The project does not use `libusb-1.0`. The project uses `libusb20`, which
