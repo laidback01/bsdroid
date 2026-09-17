@@ -219,6 +219,52 @@ here.
 Charge mode and file transfer mode share `idProduct`. The two modes therefore
 need the storage test, and no descriptor field separates them.
 
+## Three devices in charge mode
+
+A device in charge mode gives no file access. The descriptor is a different
+question, and the three test devices do not agree:
+
+| Device              | MTP interface in charge mode | The descriptor differs |
+| ------------------- | ---------------------------- | ---------------------- |
+| Samsung SM-S901U    | present                      | no, `idProduct` is the same |
+| Motorola Moto G (5) | absent                       | yes                    |
+| Cyrus CS 24         | present                      | no, and the bytes are the same |
+
+The Cyrus gives the same 39 bytes in file transfer mode and in charge mode:
+
+```
+09 02 27 00 01 01 04 80 fa 09 04 00 00 03 06 01 01 05
+07 05 81 02 00 02 00 07 05 01 02 00 02 00 07 05 82 03 1c 00 06
+```
+
+The `idProduct` is 0x2008 in both modes. The name of the interface is `MTP` in
+both modes. Nothing in the descriptor separates the two modes.
+
+### The rule
+
+Two devices of three keep the MTP interface in charge mode. One of the two
+gives a descriptor that does not change at all.
+
+A host therefore cannot read the mode from the descriptor. A host must ask for
+the storage, and read the answer.
+
+`mtpprobe` says this to a user, and two makes of telephone now support the
+statement.
+
+## The name of a mode is not the same on each telephone
+
+| Mode                    | Samsung SM-S901U      | Cyrus CS 24        |
+| ----------------------- | --------------------- | ------------------ |
+| MTP                     | `File transfer`       | `File Transfer`    |
+| PTP                     | `Transferring images` | `PTP`              |
+| No data                 | `Charging only`       | `No data transfer` |
+
+Every mode charges the telephone. The name of a mode describes the data, and
+not the power.
+
+A message to a user must give both names. A user who looks for `Charging only`
+on a Cyrus CS 24 finds nothing.
+
 ## What this means for a fault report
 
 The host can state these facts:
