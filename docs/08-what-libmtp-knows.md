@@ -15,10 +15,10 @@ document compares the two.
 | Cyrus CS 24       | 0e8d:2008     | `MT65xx/67xx (MTP mode)`        |
 
 The Cyrus is not in the database by name. The database holds the chip, and not
-the telephone. Many makers sell a MediaTek chip under a new name, so the chip
+the cellphone. Many makers sell a MediaTek chip under a new name, so the chip
 is the useful entry.
 
-### One telephone, three names
+### One cellphone, three names
 
 The third test device carries three names:
 
@@ -29,14 +29,14 @@ The third test device carries three names:
 | The `libmtp` database  | `MediaTek MT65xx/67xx (MTP mode)` |
 
 The owner bought a NUU B20. The descriptor names a different company, because
-another company built the telephone. The database names the chip, because many
-telephones hold the same chip.
+another company built the cellphone. The database names the chip, because many
+cellphones hold the same chip.
 
 A host must therefore identify a device by `idVendor` and `idProduct`. A name
 is for a person to read.
 
 The project met this fault a second time. FreeBSD names the Samsung
-`GT-I9070 (network tethering)` in tethering mode, and a GT-I9070 is a telephone
+`GT-I9070 (network tethering)` in tethering mode, and a GT-I9070 is a cellphone
 from 2012. See `docs/02-device-states.md`.
 
 ## Where the measurements agree
@@ -57,7 +57,7 @@ Six measurements of six agree.
 The Samsung gives 0x6866 in image transfer mode. The database holds 0x6865 for
 that mode, and holds no 0x6866.
 
-The database entry comes from older telephones. The SM-S901U is newer, and the
+The database entry comes from older cellphones. The SM-S901U is newer, and the
 identifier changed.
 
 This is a small contribution to the database.
@@ -133,5 +133,5 @@ Read the database. The database holds the work of many people over many years,
 and the work covers 1540 devices.
 
 The database does not remove the need to measure. The database holds no entry
-for 0x6866, and the database holds no timing for a modern telephone. A
+for 0x6866, and the database holds no timing for a modern cellphone. A
 measurement adds to the database, and the database guards a measurement.

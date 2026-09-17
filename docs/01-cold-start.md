@@ -19,7 +19,7 @@ list one time:
   cycle  20/20       20 ms   1 storage(s)
 ```
 
-Cycle 1 read no storage. Cycle 2 read one storage. Nobody touched the phone
+Cycle 1 read no storage. Cycle 2 read one storage. Nobody touched the cellphone
 between the two cycles.
 
 A second run of the same test, a few seconds later, read one storage on every
@@ -111,7 +111,7 @@ storages and gave three causes:
 - a permission question with no answer.
 
 All three causes are real. None of the three was the cause on the test system.
-The message sent the user to the phone, and the phone was correct.
+The message sent the user to the cellphone, and the cellphone was correct.
 
 A diagnostic tool that names the wrong cause is worse than a tool that names no
 cause. The tool now retries first, and the tool names the retry count.

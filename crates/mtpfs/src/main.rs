@@ -76,9 +76,9 @@ fn main() -> std::process::ExitCode {
         println!("  mtpfs <mount point> [options]");
         println!();
         println!("Before you start:");
-        println!("  1. Connect the telephone.");
-        println!("  2. Unlock the telephone.");
-        println!("  3. Put the telephone into file transfer mode.");
+        println!("  1. Connect the cellphone.");
+        println!("  2. Unlock the cellphone.");
+        println!("  3. Put the cellphone into file transfer mode.");
         println!();
         println!("Options:");
         println!("  -f    Stay in the foreground, and write messages.");
@@ -402,7 +402,9 @@ unsafe extern "C" fn op_write(
         p.data.resize(end, 0);
     }
     // SAFETY: FUSE gives a buffer of `size` bytes.
-    unsafe { core::ptr::copy_nonoverlapping(buf as *const u8, p.data[offset..].as_mut_ptr(), size) };
+    unsafe {
+        core::ptr::copy_nonoverlapping(buf as *const u8, p.data[offset..].as_mut_ptr(), size)
+    };
     size as i32
 }
 
@@ -487,7 +489,11 @@ fn remove(path: *const i8, want_dir: bool) -> i32 {
         None => return -libc_enoent(),
     };
     if is_dir != want_dir {
-        return if want_dir { -libc_enotdir() } else { -libc_eisdir() };
+        return if want_dir {
+            -libc_enotdir()
+        } else {
+            -libc_eisdir()
+        };
     }
 
     match fs.mtp.delete_object(handle) {

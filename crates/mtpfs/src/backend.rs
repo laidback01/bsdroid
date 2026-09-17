@@ -96,8 +96,8 @@ impl std::fmt::Display for Error {
         match self {
             Self::NoDevice => write!(
                 f,
-                "no device gives an MTP interface. Connect the telephone, \
-                 unlock the telephone, and put the telephone into file \
+                "no device gives an MTP interface. Connect the cellphone, \
+                 unlock the cellphone, and put the cellphone into file \
                  transfer mode"
             ),
             Self::Usb(e) => write!(f, "{e}"),
@@ -107,8 +107,8 @@ impl std::fmt::Display for Error {
             }
             Self::NoStorage => write!(
                 f,
-                "the device reports no storage. Unlock the telephone, and put \
-                 the telephone into file transfer mode"
+                "the device reports no storage. Unlock the cellphone, and put \
+                 the cellphone into file transfer mode"
             ),
             Self::NoPartialRead => write!(
                 f,
@@ -441,13 +441,10 @@ impl Mtp {
         }
 
         // The device answers with the storage, the parent and the new handle.
-        let handle = resp
-            .get(2)
-            .copied()
-            .ok_or(Error::Device {
-                step: "SendObjectInfo",
-                code,
-            })?;
+        let handle = resp.get(2).copied().ok_or(Error::Device {
+            step: "SendObjectInfo",
+            code,
+        })?;
 
         // A folder needs no second operation.
         if is_folder {
@@ -528,10 +525,7 @@ impl Mtp {
         let n = self.channels.read.read(&mut buf, TIMEOUT)?;
         let c = Container::parse(&buf[..n])?;
         if c.kind != ContainerType::Response {
-            return Err(Error::Device {
-                step,
-                code: c.code,
-            });
+            return Err(Error::Device { step, code: c.code });
         }
         Ok((c.code, c.parameters()))
     }

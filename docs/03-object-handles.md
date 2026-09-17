@@ -77,7 +77,7 @@ then sees the evidence, and does not need to trust a calculation.
 
 ## Image transfer mode gives a part of the storage
 
-The same phone, in image transfer mode:
+The same cellphone, in image transfer mode:
 
 | Item                       | File transfer | Image transfer |
 | -------------------------- | ------------- | -------------- |
@@ -111,9 +111,9 @@ The object count is the only test that shows the difference.
 
 ### The count is not a property of the modes
 
-The two counts, 2059 and 821, come from one phone with one set of files. The
-owner of the test phone makes photographs and videos, and keeps few other
-files. A phone with much music gives a much larger difference.
+The two counts, 2059 and 821, come from one cellphone with one set of files. The
+owner of the test cellphone makes photographs and videos, and keeps few other
+files. A cellphone with much music gives a much larger difference.
 
 Do not use the ratio. Use the folder list, which does not change with the
 files:

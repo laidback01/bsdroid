@@ -17,7 +17,8 @@ and one set of checks.
 ## The measurement
 
 A Samsung SM-S901U in image transfer mode, on a host with FreeBSD
-15.1-RELEASE-p2. The phone connects through a chain of hubs, and the link runs
+15.1-RELEASE-p2. The cellphone connects through a chain of hubs, and the link
+runs
 at high speed, which is 480 Mbit each second.
 
 | File size | Read size | Reads | Time   | Rate         |
@@ -34,10 +35,11 @@ the size.
 A size that agrees is not a proof. Two files of the same size hold different
 bytes.
 
-The host copied each file, and then compared a SHA-256 sum. The phone made the
+The host copied each file, and then compared a SHA-256 sum. The cellphone made
+the
 second sum, with the `sha256sum` command over `adb`.
 
-| File                        | Host sum | Phone sum |
+| File                        | Host sum | Cellphone sum |
 | --------------------------- | -------- | --------- |
 | IMG_20260118_074042.jpg      | 205740b4… | 205740b4… |
 | c3d48750-…-9e45ab2dbf5d.jpg | 25dc6d0f… | 25dc6d0f… |
@@ -62,26 +64,27 @@ is a test hook, and not a setting for a user.
 ## What limits the rate
 
 The first measurement gave 32.1 MiB each second. The question is what sets the
-limit: the code, the phone, the cable or the port.
+limit: the code, the cellphone, the cable or the port.
 
 The project tested each one.
 
 | Test                                  | Result                          | What the result rules out |
 | ------------------------------------- | ------------------------------- | ------------------------- |
-| Phone through a chain of hubs         | HIGH speed, 32.1 MiB/s          | nothing yet               |
-| Phone direct to a port on the board   | HIGH speed, no change           | the hub chain             |
+| Cellphone through a chain of hubs         | HIGH speed, 32.1 MiB/s          | nothing yet               |
+| Cellphone direct to a port on the board   | HIGH speed, no change           | the hub chain             |
 | Second cable, heavier shielding       | HIGH speed, no change           | one bad cable             |
-| BOS descriptor of the phone           | the phone supports super speed  | the phone                 |
+| BOS descriptor of the cellphone           | the cellphone supports super speed  | the cellphone                 |
 | Flash drive, back panel               | SUPER speed, 5 Gbit each second | the host and the driver   |
-| Flash drive, the port the phone used  | SUPER speed, 5 Gbit each second | that port, and the hubs   |
+| Flash drive, the port the cellphone used  | SUPER speed, 5 Gbit each second | that port, and the hubs   |
 
 The last test is the one that closes the question. A flash drive needs no
-cable, and the drive reached super speed in the same port that gave the phone
+cable, and the drive reached super speed in the same port that gave the
+cellphone
 high speed.
 
 Every part of the path can do super speed:
 
-- the phone, by the BOS descriptor,
+- the cellphone, by the BOS descriptor,
 - the port, by the flash drive,
 - the hubs, because the port sits behind them,
 - the host and the driver, by the 400 MB each second the drive reached.
@@ -114,18 +117,18 @@ cable:
 ```
 
 `wSpeedsSupported` holds one bit for each speed. Bit 3 means super speed, and
-the phone sets the bit.
+the cellphone sets the bit.
 
 `mtpprobe bench` reads this descriptor. A user therefore learns whether a
 better cable helps, before the user buys a cable.
 
-### A cable for a telephone is often USB 2.0
+### A cable for a cellphone is often USB 2.0
 
 A cable that carries only USB 2.0 needs 4 wires. A cable that carries super
 speed needs 9. The plug looks the same.
 
 Two cables gave high speed on the test system. A cable that came with a disk is
-a better test than a cable that came with a telephone.
+a better test than a cable that came with a cellphone.
 
 ## The link runs at 480 Mbit each second
 
@@ -136,7 +139,7 @@ part of the time.
 The measurement of 32.1 MiB each second is near that limit. The limit is the
 USB link, and not the code.
 
-An SM-S901U supports a faster USB mode. The test host connects the phone
+An SM-S901U supports a faster USB mode. The test host connects the cellphone
 through a chain of hubs, and the chain gives high speed. A direct cable gives a
 faster link.
 
@@ -166,8 +169,8 @@ The device still held 6281974 bytes for the host. The host then sent a new
 command, and the write to the device did not finish. Every later command
 failed.
 
-A user sees a phone that works with no program. The cause is the earlier
-program, and not the phone.
+A user sees a cellphone that works with no program. The cause is the earlier
+program, and not the cellphone.
 
 ### What repairs the device
 

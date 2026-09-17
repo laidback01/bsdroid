@@ -17,7 +17,7 @@ A host that finds an MTP interface does not know that the host can read a file.
 
 ## The measurements
 
-Three readings of the same phone, with the same cable and the same host.
+Three readings of the same cellphone, with the same cable and the same host.
 
 | Item                | A: file transfer | B: charge, locked | C: charge, unlocked |
 | ------------------- | ---------------- | ----------------- | ------------------- |
@@ -33,10 +33,10 @@ Three readings of the same phone, with the same cable and the same host.
 
 ## Two ideas, and what the readings did to them
 
-**Idea 1: a phone in charge mode removes the MTP interface.**
+**Idea 1: a cellphone in charge mode removes the MTP interface.**
 
 The idea gave a clean rule: no MTP interface means the wrong USB mode. Readings
-B and C disprove the idea. The phone keeps the MTP interface in charge mode,
+B and C disprove the idea. The cellphone keeps the MTP interface in charge mode,
 with the same number and the same endpoints.
 
 **Idea 2: the interface count tells the host the USB mode.**
@@ -50,7 +50,7 @@ it. Reading C arrived later and broke it.
 
 ## What reading C settles
 
-Reading C has an unlocked screen and charge mode, and the phone gives 0
+Reading C has an unlocked screen and charge mode, and the cellphone gives 0
 storages. A locked screen is therefore not needed for the empty list. Charge
 mode alone is enough.
 
@@ -61,7 +61,8 @@ changes one thing at a time is still missing.
 ## An untested idea
 
 Reading B is locked and gives 2 interfaces. Readings A and C are unlocked and
-give 4. The pattern gives an idea: when the screen is unlocked, the phone gives
+give 4. The pattern gives an idea: when the screen is unlocked, the cellphone
+gives
 the full interface set.
 
 Three readings are not enough to call this a rule. This document records the
@@ -72,7 +73,8 @@ The project holds a fixture for reading B. See
 
 ## Image transfer mode works
 
-The phone has a mode named "Transferring images". The mode carries PTP. MTP is
+The cellphone has a mode named "Transferring images". The mode carries PTP. MTP
+is
 an extension of PTP, so the two modes share the interface class.
 
 Reading D, with the screen unlocked:
@@ -99,7 +101,7 @@ asks one time reports "no files" for a mode that works.
 The test above read the storage, and the test did not list an object.
 
 A later test listed the objects. Image transfer mode gives 821 objects, and
-file transfer mode gives 2059 objects on the same phone. Image transfer mode
+file transfer mode gives 2059 objects on the same cellphone. Image transfer mode
 gives 2 folders in the root, and file transfer mode gives 13.
 
 The capacity and the free space are the same in both modes, so the storage test
@@ -123,7 +125,7 @@ configuration descriptor, and `Interface::string_index` holds the value.
 
 This finding narrows an earlier statement in this document. A host cannot learn
 the USB mode from the interface class. A host can learn something from other
-fields, on this phone. A test on one phone is not a rule for all phones.
+fields, on this cellphone. A test on one cellphone is not a rule for all phones.
 
 ## Tethering mode removes the interface
 
@@ -163,7 +165,8 @@ FreeBSD names the device in this mode:
 GT-I9070 (network tethering, USB debugging enabled)
 ```
 
-A GT-I9070 is a Galaxy S Advance from 2012. The phone is an SM-S901U from 2022.
+A GT-I9070 is a Galaxy S Advance from 2012. The cellphone is an SM-S901U from
+2022.
 The name comes from a product identifier table in the host, and the table maps
 0x6864 to the old model.
 
@@ -199,7 +202,8 @@ classes.
 
 ### A note about the passcode
 
-The user reported that MIDI mode needed no passcode on the phone, and that file
+The user reported that MIDI mode needed no passcode on the cellphone, and that
+file
 transfer mode did need one. The project made no measurement of this behaviour.
 The note is a report from a person, and not a test result.
 
@@ -248,10 +252,10 @@ gives a descriptor that does not change at all.
 A host therefore cannot read the mode from the descriptor. A host must ask for
 the storage, and read the answer.
 
-`mtpprobe` says this to a user, and two makes of telephone now support the
+`mtpprobe` says this to a user, and two makes of cellphone now support the
 statement.
 
-## The name of a mode is not the same on each telephone
+## The name of a mode is not the same on each cellphone
 
 | Mode      | Samsung SM-S901U                    | Cyrus CS 24        | Motorola Moto G (5)       |
 | --------- | ----------------------------------- | ------------------ | ------------------------- |
@@ -261,7 +265,7 @@ statement.
 | PTP       | `Transferring Images`               | `PTP`              | `Transfer photos (PTP)`   |
 | No data   | `Charging phone only`               | `No data transfer` | `Charge this device`      |
 
-Every mode charges the telephone. The name of a mode describes the data, and
+Every mode charges the cellphone. The name of a mode describes the data, and
 not the power.
 
 ### No name agrees on all three devices
@@ -269,12 +273,12 @@ not the power.
 Not one row above holds the same name three times. The name `MIDI` agrees on
 two devices, and the third device writes `Use this device as MIDI`.
 
-The Motorola gives no option for tethering in this menu. A telephone holds that
+The Motorola gives no option for tethering in this menu. A cellphone holds that
 setting in another place.
 
 ### A word is better help than a name
 
-A list of names fails on the next telephone. A word in the name does not:
+A list of names fails on the next cellphone. A word in the name does not:
 
 | Mode    | The word that each name holds |
 | ------- | ----------------------------- |
@@ -287,7 +291,7 @@ tells a user to look for the word, and gives the three names as examples.
 
 An earlier version of this document gave `File transfer` and `Charging only`
 for the Samsung. Both names were wrong. The tool then told a user to choose an
-option that the telephone does not hold, which is worse than no help at all.
+option that the cellphone does not hold, which is worse than no help at all.
 
 ## What this means for a fault report
 
@@ -324,7 +328,7 @@ that mistake.
 ## An open question
 
 A host with `adb` can read `sys.usb.config` and learn the mode. `adb` needs
-developer mode on the phone, so the product cannot depend on `adb`.
+developer mode on the cellphone, so the product cannot depend on `adb`.
 
 No test yet shows a way to learn the USB mode over MTP alone. The
 `GetDeviceInfo` operation gives a list of supported operations, and no test yet

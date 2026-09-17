@@ -216,11 +216,11 @@ fn no_mtp_message(backend: &Backend) -> String {
     let mut m = String::from("an Android device is connected, and the device gives no MTP\n");
     m.push_str("  interface. The device shows the adb interface, so the device is\n");
     m.push_str("  awake and the cable carries data.\n\n");
-    m.push_str("  Put the telephone into file transfer mode:\n");
+    m.push_str("  Put the cellphone into file transfer mode:\n");
     m.push_str("    1. Open the notification area.\n");
     m.push_str("    2. Find the USB notification.\n");
     m.push_str("    3. Choose file transfer.\n\n");
-    m.push_str("  The name is not the same on each telephone. These are the\n");
+    m.push_str("  The name is not the same on each cellphone. These are the\n");
     m.push_str("  names the project has seen:\n");
     m.push_str("    Transferring Files / Android Auto\n");
     m.push_str("    File Transfer\n");
@@ -618,7 +618,7 @@ fn bench() -> Result<(), String> {
                 println!("    about the device alone.");
                 println!();
                 println!("    The cable or the port is the limit. A cable for a");
-                println!("    telephone often holds no super speed wires, and the plug");
+                println!("    cellphone often holds no super speed wires, and the plug");
                 println!("    looks the same as a cable that does.");
             }
             Ok(_) => {
@@ -955,7 +955,7 @@ fn caps() -> Result<(), String> {
     Ok(())
 }
 
-/// Tells a user to put a telephone into file transfer mode.
+/// Tells a user to put a cellphone into file transfer mode.
 ///
 /// The instruction leads with the job, and not with a name. No name agrees
 /// across the three test devices, so a name is an example and not an
@@ -967,15 +967,15 @@ fn caps() -> Result<(), String> {
 /// Motorola Moto G (5)   Transfer files
 /// ```
 ///
-/// This project needs file transfer mode alone. A telephone also gives modes
+/// This project needs file transfer mode alone. A cellphone also gives modes
 /// for MIDI and for tethering, and this project never needs one of those. The
 /// message does not name them.
 ///
 /// See `docs/02-device-states.md`.
 fn print_file_mode_names(indent: &str) {
-    println!("{indent}Put the telephone into file transfer mode.");
+    println!("{indent}Put the cellphone into file transfer mode.");
     println!();
-    println!("{indent}The name is not the same on each telephone. These are the");
+    println!("{indent}The name is not the same on each cellphone. These are the");
     println!("{indent}names the project has seen:");
     println!("{indent}  Transferring Files / Android Auto");
     println!("{indent}  File Transfer");
@@ -1263,7 +1263,7 @@ fn report_no_storage(w: &StorageWait) {
     println!();
     println!("    Do these two things on the phone, in this order:");
     println!("      1. Unlock the screen.");
-    println!("      2. Put the telephone into file transfer mode.");
+    println!("      2. Put the cellphone into file transfer mode.");
     println!();
     print_file_mode_names("         ");
     println!();

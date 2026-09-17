@@ -230,7 +230,7 @@ MTP device found:
     about the device alone.
 
     The cable or the port is the limit. A cable for a
-    telephone often holds no super speed wires, and the plug
+    cellphone often holds no super speed wires, and the plug
     looks the same as a cable that does.
 
 --- The test files ---

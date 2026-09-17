@@ -616,7 +616,7 @@ fn an_endpoint_before_any_interface_is_an_error() {
     );
 }
 
-// --- A second make of telephone ---
+// --- A second make of cellphone ---
 //
 // A Motorola Moto G (5) gives MTP with a vendor class, and names the
 // interface "MTP". A Samsung SM-S901U gives MTP with the still imaging class.

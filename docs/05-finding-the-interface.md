@@ -3,7 +3,7 @@
 A host must find the interface that carries MTP. The interface class is not
 enough, and this document records why.
 
-## Three makes of telephone, three shapes
+## Three makes of cellphone, three shapes
 
 | Field              | Samsung SM-S901U | Motorola Moto G (5) | Cyrus CS 24 |
 | ------------------ | ---------------- | ------------------- | ----------- |
@@ -37,13 +37,13 @@ A fourth device with a third class changes this answer.
 ## The rule that failed
 
 The project first looked for class 0x06, subclass 0x01, protocol 0x01. The rule
-came from one telephone.
+came from one cellphone.
 
 The rule finds the Samsung. The rule does not find the Motorola, and the
 Motorola gives MTP.
 
-A host that uses the rule tells a Motorola user that the telephone gives no MTP
-interface. The telephone does give one.
+A host that uses the rule tells a Motorola user that the cellphone gives no MTP
+interface. The cellphone does give one.
 
 ## The rule that works
 

@@ -2,7 +2,7 @@
 # Records what one device does, for the test hardware table.
 #
 # The script works with any device that gives an MTP interface. The script does
-# not look for one make of telephone.
+# not look for one make of cellphone.
 #
 # The script hides each file name. A capture goes into a repository, and a file
 # name is private. See BSDROID_REDACT in the source.

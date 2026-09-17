@@ -10,7 +10,7 @@
 #   BOS descriptor      none, so the device runs at high speed at most
 #   USB mode            file transfer
 #
-# This capture holds the finding that a second make of telephone gave.
+# This capture holds the finding that a second make of cellphone gave.
 #
 # The MTP interface of this device is NOT the still imaging class. The
 # interface is a vendor class, and the name of the interface is "MTP":

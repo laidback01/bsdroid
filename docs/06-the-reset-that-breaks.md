@@ -97,7 +97,7 @@ for the rest.
 ### What the fault did to a measurement
 
 The project reported one cycle at 23 milliseconds for a Samsung, and 270
-milliseconds for two other telephones.
+milliseconds for two other cellphones.
 
 The 23 millisecond measurement came from a version with no drain. The 270
 millisecond measurements came from a version with the drain. The numbers do not

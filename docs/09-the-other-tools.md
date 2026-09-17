@@ -18,7 +18,7 @@ same trouble each time. The measurements below put a number on that experience.
 - FreeBSD 15.1-RELEASE-p2, amd64
 - Samsung SM-S901U, file transfer mode
 - The same three files each time
-- The host compares a SHA-256 sum with the sum the telephone gives over `adb`
+- The host compares a SHA-256 sum with the sum the cellphone gives over `adb`
 
 ## The result
 
@@ -60,14 +60,14 @@ The program links `/usr/lib/libusb.so.3`, which is the compatibility layer.
 
 ### The filesystem of this project
 
-The same 450 MB file, on the same telephone, in the same session:
+The same 450 MB file, on the same cellphone, in the same session:
 
 | Item          | Value                          |
 | ------------- | ------------------------------ |
 | Time          | 15 seconds                     |
 | Rate          | 29.4 MB each second            |
 | Size          | 450943822 bytes, which is right |
-| SHA-256       | agrees with the telephone      |
+| SHA-256       | agrees with the cellphone      |
 
 ## The repair of a device that another program left
 
@@ -86,7 +86,7 @@ then copied the 450 MB file with the correct sum.
 ## One cause, and three programs
 
 The three programs come from different people, and the three hold different
-code. Each one fails on FreeBSD, and each one reaches the telephone through
+code. Each one fails on FreeBSD, and each one reaches the cellphone through
 `/usr/lib/libusb.so.3`.
 
 That file is the compatibility layer. The layer holds the defect in

@@ -4,8 +4,9 @@ This document records a defect. The defect is the reason for the project.
 
 ## Summary
 
-An Android phone does not mount on FreeBSD. The two available MTP filesystems
-both stop and use 100% of one CPU core. The phone is not at fault. The
+An Android cellphone does not mount on FreeBSD. The two available MTP
+filesystems
+both stop and use 100% of one CPU core. The cellphone is not at fault. The
 filesystems are not at fault. The fault is in the compatibility layer below
 both of them.
 
@@ -82,9 +83,10 @@ The device answers `CloseSession` correctly. The loop starts after the answer.
 
 The first version of this document gave a reason for the loop. `simple-mtpfs`
 opens a PTP session, closes the session, and opens a second session. The idea
-was that the phone stops at the second open.
+was that the cellphone stops at the second open.
 
-`mtpprobe` tested the idea against the same phone. The program sent this exact
+`mtpprobe` tested the idea against the same cellphone. The program sent this
+exact
 sequence through `libusb20`:
 
 | Step | Operation      | Time  | Result |
@@ -98,8 +100,8 @@ sequence through `libusb20`:
 Step 5 is the step the idea said must fail. Step 5 took 1 millisecond and gave
 OK.
 
-**The idea was wrong.** The phone accepts a second PTP session. The phone is
-not the cause, and no phone quirk is the cause.
+**The idea was wrong.** The cellphone accepts a second PTP session. The
+cellphone is not the cause, and no cellphone quirk is the cause.
 
 ### What the test leaves
 
@@ -125,7 +127,7 @@ does not yet say that the cycle is the cause, because no test shows it.
 | A libmtp bug         | `adb` moves data over USB with no loop        | Not the fault |
 
 The last row is important. `adb` uses USB on the same machine and the same
-phone, and `adb` does not loop. The defect needs the MTP transfer pattern.
+cellphone, and `adb` does not loop. The defect needs the MTP transfer pattern.
 
 ## What the project does about the defect
 
