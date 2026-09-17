@@ -1,0 +1,212 @@
+# Device capture: cyrus-cs24
+# node: ugen0.11
+
+## usbconfig
+ugen0.11: <Cyrus Technology CS 24 MediaTek Inc.> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (500mA)
+
+
+## device descriptor
+REQUEST = <0x12 0x01 0x00 0x02 0x00 0x00 0x00 0x40 0x8d 0x0e 0x08 0x20 0x04 0x04 0x01 0x02 0x03 0x01><@ >
+
+## BOS descriptor, which says what speeds the device supports
+REQUEST = <ERROR>
+
+## configuration descriptor
+REQUEST = <0x09 0x02 0x27 0x00 0x01 0x01 0x04 0x80 0xfa 0x09 0x04 0x00 0x00 0x03 0x06 0x01 0x01 0x05 0x07 0x05 0x81 0x02 0x00 0x02 0x00 0x07 0x05 0x01 0x02 0x00 0x02 0x00 0x07 0x05 0x82 0x03 0x1c 0x00 0x06><'>
+
+## interface classes
+    bNumInterfaces = 0x0001 
+      bInterfaceClass = 0x0006  <Still imaging>
+      bInterfaceSubClass = 0x0001 
+      bInterfaceProtocol = 0x0001 
+
+## sys.usb.config, if adb answers
+
+## mtpprobe probe
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x0e8d, product 0x2008
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+--- Session 1 ---
+    OpenSession           1 ms   0x2001 OK
+    GetStorageIDs         0 ms   1 attempt(s)   1 storage(s)
+      storages: [65537]
+    GetStorageInfo        0 ms   0x2001 OK   76 data bytes
+      description: Internal shared storage
+      capacity:    120256954368 bytes
+      free:        85877628928 bytes
+    CloseSession          0 ms   0x2001 OK   0 data bytes
+
+--- Session 2: a second PTP session ---
+    OpenSession           0 ms   0x2001 OK
+
+The device answers over MTP.
+
+RESULT: pass.
+
+## mtpprobe objects
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x0e8d, product 0x2008
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+storage 0x00010001
+
+--- GetObjectHandles with parent 0x00000000 ---
+      1454 ms   8656 objects   34628 data bytes   1 read(s)
+    the first 12 objects:
+      folder  0x00000007  parent 0x00000000            0  <name hidden>
+      folder  0x0000000c  parent 0x00000000            0  <name hidden>
+      folder  0x00000005  parent 0x00000000            0  <name hidden>
+      folder  0x0000000d  parent 0x00000000            0  <name hidden>
+      folder  0x00000001  parent 0x00000000            0  <name hidden>
+      folder  0x0000000e  parent 0x00000000            0  <name hidden>
+      folder  0x00000002  parent 0x00000000            0  <name hidden>
+      folder  0x0000000b  parent 0x00000000            0  <name hidden>
+      folder  0x00000003  parent 0x00000000            0  <name hidden>
+      folder  0x00000008  parent 0x00000000            0  <name hidden>
+      folder  0x0000000a  parent 0x00000000            0  <name hidden>
+      folder  0x00000006  parent 0x00000000            0  <name hidden>
+      of the first 12: 12 folder(s), 0 file(s)
+
+--- GetObjectHandles with parent 0xffffffff ---
+         0 ms   14 objects   60 data bytes   1 read(s)
+    the first 12 objects:
+      folder  0x00000007  parent 0x00000000            0  <name hidden>
+      folder  0x0000000c  parent 0x00000000            0  <name hidden>
+      folder  0x00000005  parent 0x00000000            0  <name hidden>
+      folder  0x0000000d  parent 0x00000000            0  <name hidden>
+      folder  0x00000001  parent 0x00000000            0  <name hidden>
+      folder  0x0000000e  parent 0x00000000            0  <name hidden>
+      folder  0x00000002  parent 0x00000000            0  <name hidden>
+      folder  0x0000000b  parent 0x00000000            0  <name hidden>
+      folder  0x00000003  parent 0x00000000            0  <name hidden>
+      folder  0x00000008  parent 0x00000000            0  <name hidden>
+      folder  0x0000000a  parent 0x00000000            0  <name hidden>
+      folder  0x00000006  parent 0x00000000            0  <name hidden>
+      of the first 12: 12 folder(s), 0 file(s)
+
+RESULT: pass.
+
+## mtpprobe reopen 10
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+--- USB device open and close cycle ---
+The test opens the USB device, reads the storage, and closes the
+device. The test repeats the cycle 10 times.
+
+simple-mtpfs uses this pattern, and simple-mtpfs stops. The PTP
+session cycle already works. See docs/00-why.md.
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x0e8d, product 0x2008
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+  cycle   1/10      269 ms   1 storage(s)
+  cycle   2/10      282 ms   1 storage(s)
+  cycle   3/10      266 ms   1 storage(s)
+  cycle   4/10      276 ms   1 storage(s)
+  cycle   5/10      268 ms   1 storage(s)
+  cycle   6/10      269 ms   1 storage(s)
+  cycle   7/10      265 ms   1 storage(s)
+  cycle   8/10      270 ms   1 storage(s)
+  cycle   9/10      267 ms   1 storage(s)
+  cycle  10/10      266 ms   1 storage(s)
+
+  cycles:  10
+  slowest: 282 ms
+  mean:    270 ms
+
+Every cycle finished. The USB device open and close cycle does not
+stop the host when the host uses libusb20.
+
+RESULT: pass.
+
+## mtpprobe bench
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x0e8d, product 0x2008
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+--- The link ---
+    speed: high, USB 2.0 (480 Mbit each second)
+    a bulk transfer on this link reaches about 40 MiB/s
+
+    The estimate is a guide, and not a standard. A rate near the
+    estimate means the link limits the copy, and the code does not.
+
+    The device gives no BOS descriptor, which means the device
+    runs at high speed at most. A faster cable gives no faster
+    copy.
+
+--- The test files ---
+              36 bytes   <name hidden>
+         1648113 bytes   <name hidden>.heic
+        18727379 bytes   <name hidden>.mp4
+    chosen from 84 files in the first 120 objects
+
+--- The rates ---
+    Each row reads the whole file 3 times, and gives the best.
+    The host writes the bytes nowhere, so the disk does not count.
+
+            size  read size    reads        best  of est.
+              36      4 KiB        -  GetObject: the transfer on endpoint 0x81 gave: timed out
+              36     16 KiB        1      0.0 MiB/s       0%
+              36     64 KiB        1      0.0 MiB/s       0%
+              36    256 KiB        1      0.0 MiB/s       0%
+         1648113      4 KiB      403     29.2 MiB/s      73%
+         1648113     16 KiB      101     38.9 MiB/s      97%
+         1648113     64 KiB       26     39.4 MiB/s      98%
+         1648113    256 KiB        7     38.9 MiB/s      97%
+        18727379      4 KiB     4573     31.0 MiB/s      77%
+        18727379     16 KiB     1144     41.7 MiB/s     104%
+        18727379     64 KiB      286     42.1 MiB/s     105%
+        18727379    256 KiB       72     42.4 MiB/s     106%
+
+--- How to read this ---
+    A small file gives a low rate. The cost of one operation does
+    not change with the size, so the cost counts for more.
+
+    A larger read size gives a higher rate, up to a limit. The
+    limit is the link, or the device.
+
+    A rate far under the estimate, with a large file and a large
+    read size, points at the hub chain or the cable.
+
+RESULT: pass.

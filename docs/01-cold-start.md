@@ -49,18 +49,19 @@ empty list. The second gave one storage.
 
 ## The cold start is not a rule for every device
 
-A Motorola Moto G (5) does not do this. The same test, on the same host:
+Two other devices do not do this. The same test, on the same host:
 
-| Device           | Attempts until a storage appeared |
-| ---------------- | --------------------------------- |
-| Samsung SM-S901U | 2                                 |
-| Motorola Moto G (5) | 1                              |
+| Device              | Chip maker | Attempts until a storage appeared |
+| ------------------- | ---------- | --------------------------------- |
+| Samsung SM-S901U    | Qualcomm   | 2                                 |
+| Motorola Moto G (5) | Qualcomm   | 1                                 |
+| Cyrus CS 24         | MediaTek   | 1                                 |
 
-The Motorola answered the first `GetStorageIDs` with a storage, each time.
+Each of the two answered the first `GetStorageIDs` with a storage, each time.
 
 An earlier version of this document called the cold start a property of
-Android. Two devices now disagree, so the cold start is a property of a device,
-and not of Android.
+Android. One device of three does this, so the cold start is a property of a
+device, and not of Android.
 
 The retry costs nothing on a device that answers at once. A host must therefore
 still retry, because a host does not know which device it holds.

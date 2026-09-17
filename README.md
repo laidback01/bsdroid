@@ -59,27 +59,41 @@ SM-S901U. `crates/ptp-proto/tests/fixtures/README.md` records the source.
 
 ## Test hardware
 
-The project needs reports from many devices. At present the project has two,
-and the two disagree about three things:
+The project needs reports from many devices. At present the project has three:
 
-| Item                    | Samsung SM-S901U | Motorola Moto G (5) |
-| ----------------------- | ---------------- | ------------------- |
-| Android                 | 16               | 8.1                 |
-| MTP interface class     | 0x06/0x01/0x01   | 0xff/0xff/0x00      |
-| The name of the interface | `MTP`          | `MTP`               |
-| Storage on attempt 1    | no, on attempt 2 | yes                 |
-| Super speed capability  | yes              | no                  |
-| Rate, 64 KiB reads      | 32.1 MiB/s       | 28.2 MiB/s          |
-| One open and close cycle | 23 ms           | 270 ms              |
+| Item                     | Samsung SM-S901U | Motorola Moto G (5) | Cyrus CS 24    |
+| ------------------------ | ---------------- | ------------------- | -------------- |
+| Chip maker               | Qualcomm         | Qualcomm            | MediaTek       |
+| MTP interface class      | 0x06/0x01/0x01   | 0xff/0xff/0x00      | 0x06/0x01/0x01 |
+| The name of the interface | `MTP`           | `MTP`               | `MTP`          |
+| Interfaces in this mode  | 4                | 2                   | 1              |
+| An adb interface         | yes              | yes                 | no             |
+| Storage on attempt 1     | no               | yes                 | yes            |
+| Super speed capability   | yes              | no                  | no             |
+| Objects on the storage   | 2059             | 57                  | 8656           |
+| Rate, 64 KiB reads       | 32.1 MiB/s       | 28.2 MiB/s          | 39.4 MiB/s     |
+| One open and close cycle | 23 ms            | 270 ms              | 267 ms         |
 
-Each difference broke a rule that came from one device:
+### What the three devices settle
 
-- The class of the MTP interface. See `docs/05-finding-the-interface.md`.
-- The wait before a storage appears. See `docs/01-cold-start.md`.
-- The report about a cable. See `docs/04-file-transfer.md`.
+Two rules came from one device, and a second device broke each one:
 
-A third device is more use to this project than a hundred more runs on these
-two.
+- The class of the MTP interface. Two devices use the standard class, and one
+  uses a vendor class. See `docs/05-finding-the-interface.md`.
+- The wait before a storage appears. One device waits, and two do not. See
+  `docs/01-cold-start.md`.
+
+One rule holds on all three devices, and the rule now has weight:
+
+- `GetObjectHandles` with 0x00000000 gives every object, and with 0xffffffff
+  gives the root folder. The counts are 2059 and 13, 57 and 11, 8656 and 14.
+  See `docs/03-object-handles.md`.
+
+The name of the interface is `MTP` on all three devices. The name holds across
+two chip makers, and across two classes.
+
+A fourth device is more use to this project than a hundred more runs on these
+three.
 
 ### How to send a report
 
