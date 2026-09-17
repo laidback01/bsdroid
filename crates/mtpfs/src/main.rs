@@ -45,6 +45,12 @@ struct Pending {
     spool: std::path::PathBuf,
     /// The count of bytes the program wrote.
     size: u64,
+    /// What the send to the device gave, once the send happened.
+    ///
+    /// `flush` can run more than one time for one open file. The first run
+    /// sends the object and keeps the answer here. A later run reads it, and
+    /// does not send the object a second time.
+    sent: Option<i32>,
 }
 
 impl Drop for Pending {
@@ -179,6 +185,10 @@ fn main() -> std::process::ExitCode {
     ops.read = Some(op_read);
     ops.create = Some(op_create);
     ops.write = Some(op_write);
+    // `flush` runs on close and the kernel passes its answer to the
+    // program. `release` cannot report a fault, so the send lives in
+    // `flush`. See the comment on `op_flush`.
+    ops.flush = Some(op_flush);
     ops.release = Some(op_release);
     ops.unlink = Some(op_unlink);
     ops.mkdir = Some(op_mkdir);
@@ -685,6 +695,7 @@ unsafe extern "C" fn op_create(
                 file,
                 spool,
                 size: 0,
+                sent: None,
             },
         );
         if !fi.is_null() {
@@ -738,37 +749,103 @@ unsafe extern "C" fn op_write(
     })
 }
 
+/// Sends one spooled file to the device.
+///
+/// The answer is the error number a callback gives back, and 0 for success.
+fn send_pending(fs: &mut Fs, p: &mut Pending, path: &str) -> i32 {
+    // The reader starts at the first byte. `Pending` removes the spool file.
+    use std::io::Seek;
+    if let Err(e) = p.file.seek(std::io::SeekFrom::Start(0)) {
+        eprintln!("mtpfs: cannot read the spool file for {path}: {e}");
+        return -libc::EIO;
+    }
+
+    let size = p.size;
+    let parent = p.parent;
+    let name = p.name.clone();
+    match fs.mtp.send_object_stream(parent, &name, &mut p.file, size) {
+        Ok(_) => {
+            // The folder holds a new object, so the listing is old.
+            fs.tree.forget_listing(parent);
+            0
+        }
+        Err(e) => {
+            eprintln!("mtpfs: cannot write {path}: {e}");
+            -libc::EIO
+        }
+    }
+}
+
 /// Sends the file to the device when a program closes the file.
+///
+/// # Why the send happens here, and not in `release`
+///
+/// The kernel throws away the answer of `release`. The header of `libfuse`
+/// says so:
+///
+/// ```text
+/// The return value of release is ignored.
+/// ```
+///
+/// An earlier version of this program sent the whole object in `release`.
+/// Every fault on the way to the device therefore went nowhere. A copy that
+/// never reached the cellphone reported success, and `cp` said nothing. A
+/// cable pulled in the middle of a write showed this: the mount wrote
+///
+/// ```text
+/// mtpfs: cannot write /bsdroid-test/chaos.bin: SendObject: ... error
+/// ```
+///
+/// and `cp` gave the exit code 0 for the same file.
+///
+/// `flush` runs on `close`, and the kernel does pass its answer to the
+/// program. The send belongs here for that reason.
+///
+/// `flush` can run more than one time for one open file, because `dup` and
+/// `fork` both make a second descriptor. The first run sends the object and
+/// keeps the answer. A later run gives the same answer and sends nothing.
+unsafe extern "C" fn op_flush(path: *const i8, _fi: *mut sys::fuse_file_info) -> i32 {
+    let path = path_of(path);
+
+    with_fs(libc::EIO, |fs| {
+        // Take the entry out, so the send can borrow the session.
+        let Some(mut p) = fs.pending.remove(&path) else {
+            // A file the mount is not writing. A read needs no flush.
+            return 0;
+        };
+
+        let rc = match p.sent {
+            Some(earlier) => earlier,
+            None => {
+                let rc = send_pending(fs, &mut p, &path);
+                p.sent = Some(rc);
+                rc
+            }
+        };
+
+        fs.pending.insert(path, p);
+        rc
+    })
+}
+
+/// Removes the spool file when a program closes the file.
+///
+/// `flush` has almost always sent the object by the time this runs. A program
+/// that closes a file with no `flush` is rare, and the send happens here for
+/// that case. The kernel throws this answer away, so a fault here reaches
+/// nobody, which is the whole reason the send moved to `flush`.
 unsafe extern "C" fn op_release(path: *const i8, _fi: *mut sys::fuse_file_info) -> i32 {
     let path = path_of(path);
 
     with_fs(0, |fs| {
-        let mut p = match fs.pending.remove(&path) {
-            Some(p) => p,
-            None => return 0,
+        let Some(mut p) = fs.pending.remove(&path) else {
+            return 0;
         };
-
-        // The reader starts at the first byte. `Pending` removes the spool file.
-        use std::io::Seek;
-        if let Err(e) = p.file.seek(std::io::SeekFrom::Start(0)) {
-            eprintln!("mtpfs: cannot read the spool file: {e}");
-            return -libc::EIO;
+        if p.sent.is_none() {
+            let _ = send_pending(fs, &mut p, &path);
         }
-
-        let size = p.size;
-        let parent = p.parent;
-        let name = p.name.clone();
-        match fs.mtp.send_object_stream(parent, &name, &mut p.file, size) {
-            Ok(_) => {
-                // The folder holds a new object, so the listing is old.
-                fs.tree.forget_listing(parent);
-                0
-            }
-            Err(e) => {
-                eprintln!("mtpfs: cannot write {path}: {e}");
-                -libc::EIO
-            }
-        }
+        // `p` drops here, and the drop removes the spool file.
+        0
     })
 }
 

@@ -148,3 +148,59 @@ FreeBSD ships `libfuse` version 2 and version 3. The project uses version 3.
 The project generates the bindings with `bindgen`, and keeps the output in the
 tree. A user then needs no `bindgen`. The same rule applies to `libusb20`. See
 `tools/regen-bindings.sh`.
+
+## A write must report its fault from flush, and not from release
+
+MTP gives the size of an object before the bytes. FUSE gives the bytes with no
+size in advance. The mount therefore writes to a spool file on the host. When the program
+closes the file, the mount sends the whole object to the cellphone.
+
+The first version sent the object from `release`. That is the wrong callback.
+The header of `libfuse` says:
+
+```text
+The return value of release is ignored.
+```
+
+Every fault on the way to the cellphone went nowhere. A copy that never
+reached the device reported success.
+
+### The measurement
+
+A file above the 4 GiB limit of MTP fails before the host sends one byte. The
+test therefore needs no cable and no large transfer. The steps are open, ftruncate
+and close. Only `close` can carry the answer.
+
+| Version         | What `close` gave                | What the mount wrote to the log |
+| --------------- | -------------------------------- | ------------------------------- |
+| send in release | success                          | cannot write ... 5368709120 bytes |
+| send in flush   | Input/output error, errno 5      | cannot write ... 5368709120 bytes |
+
+Both versions knew. Only the second one told anybody.
+
+### How this was found
+
+A person pulled the USB cable in the middle of a write. The mount wrote
+
+```text
+mtpfs: cannot write /bsdroid-test/chaos.bin: SendObject: ... error
+```
+
+and `cp` gave the exit code 0 for the same file.
+
+No test found this. The parsers had tests, the session had tests, and the
+tests all passed. A callback gives its fault to a value that the kernel throws away. That
+callback looks correct in every test.
+
+### The rule
+
+Send the object from `flush`, which runs on `close`, and whose answer the
+kernel passes to the program.
+
+`dup` and `fork` both make a second descriptor, so `flush` can run more than
+one time for one open file. The first run sends the object and keeps the
+answer. A later run gives the same answer and sends nothing.
+
+A program can close a file with no flush. `release` still sends an object that
+`flush` never sent, for that case. That send cannot report a fault. This is the
+whole reason the work moved.
