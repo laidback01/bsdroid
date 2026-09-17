@@ -339,13 +339,24 @@ shows that the list changes with the mode.
 A cellphone that leaves the bus and comes back does not always come back in
 file transfer mode. The time off the bus decides it.
 
-| Device                     | Cable back within | What the cellphone did      |
-| -------------------------- | ----------------- | --------------------------- |
-| Samsung SM-S901U           | 1 second          | stayed in file transfer     |
-| Cyrus CS 24, 0x0e8d:0x2008 | 2 seconds         | stayed in file transfer     |
-| both                       | a longer time     | went back to charge only    |
+| Device                     | Cable back within | What the cellphone did   |
+| -------------------------- | ----------------- | ------------------------ |
+| Cyrus CS 24, 0x0e8d:0x2008 | 2 seconds         | stayed in file transfer  |
+| Samsung SM-S901U           | 1 second          | stayed in file transfer  |
+| Motorola Moto G (5)        | no time at all    | went to charge only      |
 
-A person measured this by hand, with the cable.
+A person measured this by hand, with the cable. The two that wait go back to
+charge only after the time in the table.
+
+The Moto G gives no time at all. Every break of the cable puts that cellphone
+in charge only mode, and a person must choose file transfer mode again.
+
+### Three cellphones, three answers
+
+This is the shape of every measurement in this folder. Three devices give
+three answers, and no rule holds for all three. A reader who takes the
+behaviour of one cellphone as the behaviour of Android gets a wrong answer
+two times out of three.
 
 ### Why this matters for a cable
 
