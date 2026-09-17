@@ -253,26 +253,41 @@ statement.
 
 ## The name of a mode is not the same on each telephone
 
-| Mode        | Samsung SM-S901U                    | Cyrus CS 24        |
-| ----------- | ----------------------------------- | ------------------ |
-| MTP         | `Transferring Files / Android Auto` | `File Transfer`    |
-| Tethering   | `USB tethering`                     | `USB Tethering`    |
-| MIDI        | `MIDI`                              | `MIDI`             |
-| PTP         | `Transferring Images`               | `PTP`              |
-| No data     | `Charging phone only`               | `No data transfer` |
+| Mode      | Samsung SM-S901U                    | Cyrus CS 24        | Motorola Moto G (5)       |
+| --------- | ----------------------------------- | ------------------ | ------------------------- |
+| MTP       | `Transferring Files / Android Auto` | `File Transfer`    | `Transfer files`          |
+| Tethering | `USB tethering`                     | `USB Tethering`    | absent                    |
+| MIDI      | `MIDI`                              | `MIDI`             | `Use this device as MIDI` |
+| PTP       | `Transferring Images`               | `PTP`              | `Transfer photos (PTP)`   |
+| No data   | `Charging phone only`               | `No data transfer` | `Charge this device`      |
 
 Every mode charges the telephone. The name of a mode describes the data, and
 not the power.
 
-Two names of five agree. The name for MTP does not agree, and the name for MTP
-is the name a user needs.
+### No name agrees on all three devices
+
+Not one row above holds the same name three times. The name `MIDI` agrees on
+two devices, and the third device writes `Use this device as MIDI`.
+
+The Motorola gives no option for tethering in this menu. A telephone holds that
+setting in another place.
+
+### A word is better help than a name
+
+A list of names fails on the next telephone. A word in the name does not:
+
+| Mode    | The word that each name holds |
+| ------- | ----------------------------- |
+| MTP     | `file`                        |
+| PTP     | `photo`, `image` or `PTP`     |
+| No data | `charge`, or `no data`        |
+
+Each of the three names for MTP holds the word `file`. `mtpprobe` therefore
+tells a user to look for the word, and gives the three names as examples.
 
 An earlier version of this document gave `File transfer` and `Charging only`
-for the Samsung. Both names were wrong, and the tool told a user to look for an
-option that the telephone does not hold.
-
-A message must therefore give each known name. `print_file_mode_names` in
-`mtpprobe` holds the list.
+for the Samsung. Both names were wrong. The tool then told a user to choose an
+option that the telephone does not hold, which is worse than no help at all.
 
 ## What this means for a fault report
 

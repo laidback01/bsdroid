@@ -219,9 +219,10 @@ fn no_mtp_message(backend: &Backend) -> String {
     m.push_str("  The device does not carry files. On the telephone:\n");
     m.push_str("    1. Open the notification area.\n");
     m.push_str("    2. Find the USB notification.\n");
-    m.push_str("    3. Choose the mode that carries files. A telephone names\n");
-    m.push_str("       the mode `Transferring Files / Android Auto`, or\n");
-    m.push_str("       `File Transfer`, or `Transfer files`, or `MTP`.\n\n");
+    m.push_str("    3. Choose the option that holds the word `file`. Each\n");
+    m.push_str("       telephone names the option differently, such as\n");
+    m.push_str("       `Transferring Files / Android Auto`, or `File Transfer`,\n");
+    m.push_str("       or `Transfer files`.\n\n");
     for d in &android_without_mtp {
         m.push_str(&format!("  device: {d}\n"));
     }
@@ -952,20 +953,28 @@ fn caps() -> Result<(), String> {
     Ok(())
 }
 
-/// Writes the names a telephone gives to the mode that carries files.
+/// Tells a user how to find the mode that carries files.
 ///
-/// The name is not the same on each telephone. A user who looks for
-/// `File transfer` on a Samsung SM-S901U finds nothing, because that telephone
-/// names the mode `Transferring Files / Android Auto`.
+/// The name of the mode is not the same on each telephone. Three test devices
+/// give three names, and no name agrees with another:
+///
+/// ```text
+/// Samsung SM-S901U      Transferring Files / Android Auto
+/// Cyrus CS 24           File Transfer
+/// Motorola Moto G (5)   Transfer files
+/// ```
+///
+/// A list of names is therefore the wrong help. Each name holds the word
+/// `file`, so the word is the help that works.
 ///
 /// See `docs/02-device-states.md`.
 fn print_file_mode_names(indent: &str) {
-    println!("{indent}Choose the mode that carries files. A telephone names the");
-    println!("{indent}mode in one of these ways:");
+    println!("{indent}Look for the option that holds the word `file`. Each");
+    println!("{indent}telephone gives the option a different name:");
     println!("{indent}  Transferring Files / Android Auto");
     println!("{indent}  File Transfer");
     println!("{indent}  Transfer files");
-    println!("{indent}  MTP");
+    println!("{indent}Some telephones write `MTP` in place of a name.");
 }
 
 /// Reads a handle from the command line. The text is decimal or hexadecimal.

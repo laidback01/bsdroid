@@ -72,14 +72,17 @@ The project needs reports from many devices. At present the project has three:
 | Super speed capability   | yes              | no                  | no             |
 | Objects on the storage   | 2059             | 57                  | 8656           |
 | Rate, 64 KiB reads       | 32.1 MiB/s       | 28.2 MiB/s          | 39.4 MiB/s     |
-| One open and close cycle | 48 ms            | not measured again  | not measured again |
+| One open and close cycle | 48 ms            | 46 ms               | not measured again |
+| Operations supported     | 35               | 43                  | not measured yet   |
+| A filesystem can read part of a file | yes  | yes                 | not measured yet   |
+| A filesystem can write   | yes              | yes                 | not measured yet   |
 
-The three measurements of a cycle do not compare. Each one came from a
-different version of this project, and one version held a drain that cost 250
-milliseconds. See `docs/06-the-reset-that-breaks.md`.
+An earlier version of this table gave 23 ms for the Samsung and 270 ms for the
+Motorola. Those two numbers came from two versions of this project, and one
+version held a drain that cost 250 milliseconds. The numbers did not compare.
 
-The 48 millisecond value comes from the version in the tree. The other two
-devices need a new measurement.
+The two values above come from the same version, and the two devices agree. See
+`docs/06-the-reset-that-breaks.md`.
 
 ### What the three devices settle
 
