@@ -630,8 +630,26 @@ impl OpenDevice {
 
     /// Resets the device.
     ///
-    /// A reset clears a session that an earlier program left open. `usbconfig`
-    /// needs root for a reset, and this call does not.
+    /// A reset makes the device leave the bus and come back. The device is
+    /// then in the state a user gets after a connect, so a reset clears a
+    /// session that an earlier program left open.
+    ///
+    /// # A reset needs root
+    ///
+    /// An earlier version of this comment said that `usbconfig` needs root
+    /// for a reset and that this call does not. A measurement says otherwise.
+    /// On FreeBSD 15.1, for a user in the `operator` group:
+    ///
+    /// | Who runs it | Answer                             |
+    /// | ----------- | ---------------------------------- |
+    /// | operator    | -99, and the device stays on the bus |
+    /// | root        | the device leaves and comes back in about 4600 ms |
+    ///
+    /// The code is `LIBUSB20_ERROR_OTHER`, and not `LIBUSB20_ERROR_ACCESS`,
+    /// so the number alone does not name the cause. The measurement does.
+    ///
+    /// Membership of the `operator` group is enough for every other call in
+    /// this module. A reset is the one operation that needs more.
     pub fn reset(&mut self) -> Result<(), UsbError> {
         // SAFETY: `self.dev` is open.
         let rc = unsafe { sys::libusb20_dev_reset(self.dev) };
