@@ -173,7 +173,9 @@ Same phone, same file, same test, ten writes of 1 MB each:
 | The old one | 0 of 10          |
 | A new one   | 10 of 10         |
 
-Nothing else changed. Not one line of code.
+Nothing else changed. Not one line of code. The new cable gives 10 of 10 with
+developer options on, and 10 of 10 with developer options off, so this is not
+some debug setting doing the work.
 
 The cable still charged the phone. It still enumerated at full USB 2.0 speed,
 480 Mbps. It read files perfectly, including a 16 MB file five times over with

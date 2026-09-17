@@ -295,6 +295,14 @@ A new cable repaired the fault. No line of the program changed.
 The test writes a file of 1048576 bytes ten times, and compares a SHA-256 sum
 for each write.
 
+The new cable gives 10 of 10 in two configurations of the cellphone:
+
+1. Developer options on, which gives the identifier 0x201d.
+2. Developer options off, which gives the identifier 0x2008.
+
+A user with no developer options therefore gets the same result. The cable is
+the one thing that changed the count.
+
 ### What the cellphone reported
 
 USB debugging gives a log from the cellphone. The log holds the cause:
