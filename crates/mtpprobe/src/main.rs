@@ -237,8 +237,19 @@ fn probe() -> Result<(), String> {
     // Put the protocol state of the device back to the start. A program that
     // stopped in the middle of a data phase leaves a device that answers no
     // command, and this request repairs that state.
-    if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
-        println!("    the device reset request failed: {e}");
+    // The device reset request repairs a device that a stopped program left
+    // in a bad state. The request also breaks a device that works.
+    //
+    // A Cyrus CS 24 in PTP mode passed 4 runs of 5 without the request, and
+    // 1 run of 5 with it. A Samsung SM-S901U needed the request to answer at
+    // all. The request is therefore a repair, and not a step for each open.
+    //
+    // See docs/06-the-reset-that-breaks.md.
+    if std::env::var("BSDROID_PTP_RESET").is_ok() {
+        println!("    the host sends a device reset request");
+        if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
+            println!("    the device reset request failed: {e}");
+        }
     }
 
     let channels = open
@@ -444,8 +455,19 @@ fn objects() -> Result<(), String> {
     // Put the protocol state of the device back to the start. A program that
     // stopped in the middle of a data phase leaves a device that answers no
     // command, and this request repairs that state.
-    if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
-        println!("    the device reset request failed: {e}");
+    // The device reset request repairs a device that a stopped program left
+    // in a bad state. The request also breaks a device that works.
+    //
+    // A Cyrus CS 24 in PTP mode passed 4 runs of 5 without the request, and
+    // 1 run of 5 with it. A Samsung SM-S901U needed the request to answer at
+    // all. The request is therefore a repair, and not a step for each open.
+    //
+    // See docs/06-the-reset-that-breaks.md.
+    if std::env::var("BSDROID_PTP_RESET").is_ok() {
+        println!("    the host sends a device reset request");
+        if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
+            println!("    the device reset request failed: {e}");
+        }
     }
 
     let channels = open
@@ -613,8 +635,19 @@ fn bench() -> Result<(), String> {
     // Put the protocol state of the device back to the start. A program that
     // stopped in the middle of a data phase leaves a device that answers no
     // command, and this request repairs that state.
-    if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
-        println!("    the device reset request failed: {e}");
+    // The device reset request repairs a device that a stopped program left
+    // in a bad state. The request also breaks a device that works.
+    //
+    // A Cyrus CS 24 in PTP mode passed 4 runs of 5 without the request, and
+    // 1 run of 5 with it. A Samsung SM-S901U needed the request to answer at
+    // all. The request is therefore a repair, and not a step for each open.
+    //
+    // See docs/06-the-reset-that-breaks.md.
+    if std::env::var("BSDROID_PTP_RESET").is_ok() {
+        println!("    the host sends a device reset request");
+        if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
+            println!("    the device reset request failed: {e}");
+        }
     }
 
     let channels = open
@@ -844,8 +877,19 @@ fn get(handle: Option<u32>) -> Result<(), String> {
     // Put the protocol state of the device back to the start. A program that
     // stopped in the middle of a data phase leaves a device that answers no
     // command, and this request repairs that state.
-    if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
-        println!("    the device reset request failed: {e}");
+    // The device reset request repairs a device that a stopped program left
+    // in a bad state. The request also breaks a device that works.
+    //
+    // A Cyrus CS 24 in PTP mode passed 4 runs of 5 without the request, and
+    // 1 run of 5 with it. A Samsung SM-S901U needed the request to answer at
+    // all. The request is therefore a repair, and not a step for each open.
+    //
+    // See docs/06-the-reset-that-breaks.md.
+    if std::env::var("BSDROID_PTP_RESET").is_ok() {
+        println!("    the host sends a device reset request");
+        if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
+            println!("    the device reset request failed: {e}");
+        }
     }
 
     let channels = open

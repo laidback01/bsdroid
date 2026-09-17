@@ -517,10 +517,19 @@ fn report_wedged_service() {
     println!("    connection is not the cause, so a new cable connection does");
     println!("    not help.");
     println!();
-    println!("    Restart the MTP service on the phone:");
+    println!("    Try a device reset request first:");
+    println!("      BSDROID_PTP_RESET=1 mtpprobe probe");
+    println!();
+    println!("    The request repairs some devices, and the request breaks");
+    println!("    others. See docs/06-the-reset-that-breaks.md.");
+    println!();
+    println!("    If the request does not help, restart the MTP service on the");
+    println!("    phone:");
     println!("      1. Open the USB notification.");
-    println!("      2. Choose Charging only, or No data transfer.");
-    println!("      3. Choose File transfer again.");
+    println!("      2. Choose the mode that carries no data. A phone names the");
+    println!("         mode Charging only, or No data transfer.");
+    println!("      3. Choose File transfer again. A phone names the mode File");
+    println!("         transfer, or Transferring files.");
     println!();
     println!("    A restart of the phone also works, and takes longer.");
 }

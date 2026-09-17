@@ -1,0 +1,136 @@
+# Device capture: cyrus-cs24-ptp
+# node: ugen0.11
+
+## usbconfig
+ugen0.11: <N6501L MediaTek Inc.> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (500mA)
+
+
+## device descriptor
+REQUEST = <0x12 0x01 0x00 0x02 0x00 0x00 0x00 0x40 0x8d 0x0e 0x0b 0x20 0x04 0x04 0x01 0x02 0x03 0x01><@ >
+
+## BOS descriptor, which says what speeds the device supports
+REQUEST = <ERROR>
+
+## configuration descriptor
+REQUEST = <0x09 0x02 0x27 0x00 0x01 0x01 0x04 0x80 0xfa 0x09 0x04 0x00 0x00 0x03 0x06 0x01 0x01 0x00 0x07 0x05 0x81 0x02 0x00 0x02 0x00 0x07 0x05 0x01 0x02 0x00 0x02 0x00 0x07 0x05 0x82 0x03 0x1c 0x00 0x06><'>
+
+## interface classes
+    bNumInterfaces = 0x0001 
+      bInterfaceClass = 0x0006  <Still imaging>
+      bInterfaceSubClass = 0x0001 
+      bInterfaceProtocol = 0x0001 
+
+## sys.usb.config, if adb answers
+
+## mtpprobe probe
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x0e8d, product 0x200b
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+--- Session 1 ---
+    OpenSession           8 ms   0x2001 OK
+
+RESULT: GetStorageIDs: the transfer on endpoint 0x81 gave: timed out
+
+## mtpprobe objects
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x0e8d, product 0x200b
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+storage 0x00010001
+
+--- GetObjectHandles with parent 0x00000000 ---
+       109 ms   126 objects   508 data bytes   1 read(s)
+    the first 12 objects:
+
+RESULT: GetObjectInfo: the transfer on endpoint 0x81 gave: timed out
+
+## mtpprobe reopen 10
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+--- USB device open and close cycle ---
+The test opens the USB device, reads the storage, and closes the
+device. The test repeats the cycle 10 times.
+
+simple-mtpfs uses this pattern, and simple-mtpfs stops. The PTP
+session cycle already works. See docs/00-why.md.
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x0e8d, product 0x200b
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+  cycle   1/10      303 ms   1 storage(s)
+  cycle   2/10      304 ms   1 storage(s)
+  cycle   3/10      268 ms   1 storage(s)
+  cycle   4/10      295 ms   1 storage(s)
+  cycle   5/10      286 ms   1 storage(s)
+  cycle   6/10      275 ms   1 storage(s)
+  cycle   7/10      267 ms   1 storage(s)
+  cycle   8/10      322 ms   1 storage(s)
+  cycle   9/10      270 ms   1 storage(s)
+  cycle  10/10      279 ms   1 storage(s)
+
+  cycles:  10
+  slowest: 322 ms
+  mean:    287 ms
+
+Every cycle finished. The USB device open and close cycle does not
+stop the host when the host uses libusb20.
+
+RESULT: pass.
+
+## mtpprobe bench
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x0e8d, product 0x200b
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+--- The link ---
+    speed: high, USB 2.0 (480 Mbit each second)
+    a bulk transfer on this link reaches about 40 MiB/s
+
+    The estimate is a guide, and not a standard. A rate near the
+    estimate means the link limits the copy, and the code does not.
+
+    The device gives no BOS descriptor, which means the device
+    runs at high speed at most. A faster cable gives no faster
+    copy.
+
+RESULT: GetStorageIDs: the transfer on endpoint 0x81 gave: timed out
