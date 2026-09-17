@@ -16,6 +16,7 @@ d---------   0 root wheel  0 Dec 31  1969 phone
 ```
 
 well... that's great.
+
 To be VERY CLEAR: I'm not a developer, I'm mostly a system admin who breaks
 things, sometimes fixes them. I leave the development to the real coders, or in
 this case AI! This code is 100% AI written, if you don't like that, oh well.
@@ -141,6 +142,45 @@ accepts each request and changes nothing. A fault there stops a copy, and a
 copy is the job.
 
 `docs/10-what-works.md` holds the full list, with each limit and the reason.
+
+## Use a good cable. Seriously.
+
+Before you blame this program, or your cellphone, swap the cable.
+
+One of the three test cellphones could not write a file. Reads were perfect,
+listings were perfect, and writes failed at random. Not by size, not by timing,
+not after any particular idle period - just at random. I spent a long evening
+on it. I raised the transfer deadline to 60 seconds. I matched the write size
+to the buffer in the Android kernel driver. I sent the USB reset that `libmtp`
+recommends for that exact chip. I power cycled the phone. Nothing moved the
+number.
+
+Then the phone itself told us, once USB debugging was on:
+
+```
+E d.process.medi: Mtp got unexpected short packet
+E MtpServer: Mtp receive file got error I/O error
+W MtpServer: [MTP] got response 0x2002 in command MTP_OPERATION_SEND_OBJECT
+```
+
+A short packet where none belongs. That is what a marginal cable looks like
+from the other end of the wire.
+
+Same phone, same file, same test, ten writes of 1 MB each:
+
+| Cable     | Writes that worked |
+| --------- | ------------------ |
+| The old one | 0 of 10          |
+| A new one   | 10 of 10         |
+
+Nothing else changed. Not one line of code.
+
+The cable still charged the phone. It still enumerated at full USB 2.0 speed,
+480 Mbps. It read files perfectly, including a 16 MB file five times over with
+matching SHA-256 sums every time. It just could not carry a write.
+
+So: if writes fail and reads are fine, try another cable before you open an
+issue. A charging cable that came free with something is the usual suspect.
 
 ## Build
 
@@ -308,18 +348,16 @@ The tests need no cellphone. The test data comes from real captures, and
 
 ### What is verified
 
-Three cellphones. Two read and write. One reads, and does not write:
+Three cellphones, and each one reads and writes:
 
-| Cellphone           | Chip     | Android | Read | Write |
-| ------------------- | -------- | ------- | ---- | ----- |
-| Samsung SM-S901U    | Qualcomm | 16      | yes  | yes   |
-| Motorola Moto G (5) | Qualcomm | 8.1     | yes  | yes   |
-| Cyrus CS 24         | MediaTek | 11      | yes  | no    |
+| Cellphone           | Sold as    | Chip     | Android | MTP interface  |
+| ------------------- | ---------- | -------- | ------- | -------------- |
+| Samsung SM-S901U    | Galaxy S22 | Qualcomm | 16      | 0x06/0x01/0x01 |
+| Motorola Moto G (5) | Moto G5    | Qualcomm | 8.1     | 0xff/0xff/0x00 |
+| Cyrus CS 24         | NUU B20    | MediaTek | 11      | 0x06/0x01/0x01 |
 
-The Cyrus CS 24 finds, lists and reads correctly. A write stops in the data
-phase, and the result is not the same each time. A longer deadline, a smaller
-write and a USB reset each gave no repair. `aft-mtp-mount` does not list that
-cellphone at all. See `docs/10-what-works.md`.
+Three makers, two chip makers, and three versions of Android that are eight
+years apart.
 
 Three makers, two chip makers, and three versions of Android that are eight
 years apart.
