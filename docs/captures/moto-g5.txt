@@ -1,0 +1,218 @@
+# Device capture: moto-g5
+# node: ugen0.11
+
+## usbconfig
+ugen0.11: <Moto G (5) Motorola PCS> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (500mA)
+
+
+## device descriptor
+REQUEST = <0x12 0x01 0x00 0x02 0x00 0x00 0x00 0x40 0xb8 0x22 0x76 0x2e 0x18 0x03 0x01 0x02 0x03 0x01><@"v.>
+
+## BOS descriptor, which says what speeds the device supports
+REQUEST = <ERROR>
+
+## configuration descriptor
+REQUEST = <0x09 0x02 0x3e 0x00 0x02 0x01 0x00 0x80 0xfa 0x09 0x04 0x00 0x00 0x03 0xff 0xff 0x00 0x06 0x07 0x05 0x81 0x02 0x00 0x02 0x00 0x07 0x05 0x01 0x02 0x00 0x02 0x00 0x07 0x05 0x82 0x03 0x1c 0x00 0x06 0x09 0x04 0x01 0x00 0x02 0xff 0x42 0x01 0x07 0x07 0x05 0x02 0x02 0x00 0x02 0x00 0x07 0x05 0x83 0x02 0x00 0x02 0x00><B>
+
+## interface classes
+    bNumInterfaces = 0x0002 
+      bInterfaceClass = 0x00ff  <Vendor specific>
+      bInterfaceSubClass = 0x00ff 
+      bInterfaceProtocol = 0x0000 
+      bInterfaceClass = 0x00ff  <Vendor specific>
+      bInterfaceSubClass = 0x0042 
+      bInterfaceProtocol = 0x0001 
+
+## sys.usb.config, if adb answers
+mtp,adb
+
+## mtpprobe probe
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x22b8, product 0x2e76
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+    the device reset request failed: the control request failed, code -99
+
+--- Session 1 ---
+    OpenSession           1 ms   0x2001 OK
+    GetStorageIDs         0 ms   1 attempt(s)   1 storage(s)
+      storages: [65537]
+    GetStorageInfo        0 ms   0x2001 OK   76 data bytes
+      description: Internal shared storage
+      capacity:    10766757888 bytes
+      free:        5758484480 bytes
+    CloseSession          0 ms   0x2001 OK   0 data bytes
+
+--- Session 2: a second PTP session ---
+    OpenSession           0 ms   0x2001 OK
+
+The device answers over MTP.
+
+RESULT: pass.
+
+## mtpprobe objects
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x22b8, product 0x2e76
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+    the device reset request failed: the control request failed, code -99
+
+storage 0x00010001
+
+--- GetObjectHandles with parent 0x00000000 ---
+       620 ms   57 objects   232 data bytes   1 read(s)
+    the first 12 objects:
+      folder  0x00000001  parent 0x00000000         4096  <name hidden>
+      folder  0x00000002  parent 0x00000000         4096  <name hidden>
+      folder  0x00000003  parent 0x00000000         4096  <name hidden>
+      folder  0x00000004  parent 0x00000000         4096  <name hidden>
+      folder  0x00000005  parent 0x00000000         4096  <name hidden>
+      folder  0x00000006  parent 0x00000000         4096  <name hidden>
+      folder  0x00000007  parent 0x00000000         4096  <name hidden>
+      folder  0x00000008  parent 0x00000000         4096  <name hidden>
+      folder  0x00000009  parent 0x00000000         4096  <name hidden>
+      folder  0x0000000a  parent 0x00000000         4096  <name hidden>
+      folder  0x0000000b  parent 0x0000000a         4096  <name hidden>
+      folder  0x0000000c  parent 0x0000000b         4096  <name hidden>.gms
+      of the first 12: 12 folder(s), 0 file(s)
+
+--- GetObjectHandles with parent 0xffffffff ---
+        13 ms   11 objects   48 data bytes   1 read(s)
+    the first 11 objects:
+      folder  0x00000001  parent 0x00000000         4096  <name hidden>
+      folder  0x00000002  parent 0x00000000         4096  <name hidden>
+      folder  0x00000003  parent 0x00000000         4096  <name hidden>
+      folder  0x00000004  parent 0x00000000         4096  <name hidden>
+      folder  0x00000005  parent 0x00000000         4096  <name hidden>
+      folder  0x00000006  parent 0x00000000         4096  <name hidden>
+      folder  0x00000007  parent 0x00000000         4096  <name hidden>
+      folder  0x00000008  parent 0x00000000         4096  <name hidden>
+      folder  0x00000009  parent 0x00000000         4096  <name hidden>
+      folder  0x0000000a  parent 0x00000000         4096  <name hidden>
+      folder  0x00000019  parent 0x00000000         4096  <name hidden>
+      of the first 11: 11 folder(s), 0 file(s)
+
+RESULT: pass.
+
+## mtpprobe reopen 10
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+--- USB device open and close cycle ---
+The test opens the USB device, reads the storage, and closes the
+device. The test repeats the cycle 10 times.
+
+simple-mtpfs uses this pattern, and simple-mtpfs stops. The PTP
+session cycle already works. See docs/00-why.md.
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x22b8, product 0x2e76
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+  cycle   1/10      268 ms   1 storage(s)
+  cycle   2/10      268 ms   1 storage(s)
+  cycle   3/10      271 ms   1 storage(s)
+  cycle   4/10      286 ms   1 storage(s)
+  cycle   5/10      266 ms   1 storage(s)
+  cycle   6/10      270 ms   1 storage(s)
+  cycle   7/10      270 ms   1 storage(s)
+  cycle   8/10      272 ms   1 storage(s)
+  cycle   9/10      276 ms   1 storage(s)
+  cycle  10/10      282 ms   1 storage(s)
+
+  cycles:  10
+  slowest: 286 ms
+  mean:    273 ms
+
+Every cycle finished. The USB device open and close cycle does not
+stop the host when the host uses libusb20.
+
+RESULT: pass.
+
+## mtpprobe bench
+mtpprobe 0.0.1
+timeout per transfer: 5000 ms
+
+The host sees 12 USB devices.
+
+MTP device found:
+  bus 0, address 11
+  vendor 0x22b8, product 0x2e76
+  interface 0
+  bulk in   0x81
+  bulk out  0x01
+  event in  0x82
+  packet size 512 bytes
+
+--- The link ---
+    speed: high, USB 2.0 (480 Mbit each second)
+    a bulk transfer on this link reaches about 40 MiB/s
+
+    The estimate is a guide, and not a standard. A rate near the
+    estimate means the link limits the copy, and the code does not.
+
+    The device gives no BOS descriptor, which means the device
+    runs at high speed at most. A faster cable gives no faster
+    copy.
+    the device reset request failed: the control request failed, code -99
+
+--- The test files ---
+              36 bytes   <name hidden>
+          321392 bytes   <name hidden>.db-wal
+         3702724 bytes   <name hidden>.mp4
+    chosen from 8 files in the first 120 objects
+
+--- The rates ---
+    Each row reads the whole file 3 times, and gives the best.
+    The host writes the bytes nowhere, so the disk does not count.
+
+            size  read size    reads        best  of est.
+              36      4 KiB        1      0.0 MiB/s       0%
+              36     16 KiB        1      0.0 MiB/s       0%
+              36     64 KiB        1      0.0 MiB/s       0%
+              36    256 KiB        1      0.0 MiB/s       0%
+          321392      4 KiB       79     22.5 MiB/s      56%
+          321392     16 KiB       20     27.6 MiB/s      69%
+          321392     64 KiB        5     28.2 MiB/s      70%
+          321392    256 KiB        2     28.2 MiB/s      70%
+         3702724      4 KiB      904     30.3 MiB/s      76%
+         3702724     16 KiB      226     39.2 MiB/s      98%
+         3702724     64 KiB       57     39.3 MiB/s      98%
+         3702724    256 KiB       15     39.8 MiB/s      99%
+
+--- How to read this ---
+    A small file gives a low rate. The cost of one operation does
+    not change with the size, so the cost counts for more.
+
+    A larger read size gives a higher rate, up to a limit. The
+    limit is the link, or the device.
+
+    A rate far under the estimate, with a large file and a large
+    read size, points at the hub chain or the cable.
+
+RESULT: pass.

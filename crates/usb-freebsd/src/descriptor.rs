@@ -29,6 +29,16 @@ pub const MTP_SUBCLASS: u8 = 0x01;
 /// The interface protocol for MTP.
 pub const MTP_PROTOCOL: u8 = 0x01;
 
+/// The vendor class. A device uses the class for a job the standard does not
+/// define.
+pub const VENDOR_CLASS: u8 = 0xff;
+/// The subclass that Android uses for an MTP interface with a vendor class.
+pub const VENDOR_MTP_SUBCLASS: u8 = 0xff;
+/// The protocol that Android uses for an MTP interface with a vendor class.
+pub const VENDOR_MTP_PROTOCOL: u8 = 0x00;
+/// The name that Android gives to an MTP interface with a vendor class.
+pub const VENDOR_MTP_NAME: &str = "MTP";
+
 /// The interface class for adb. The class is a vendor class.
 pub const ADB_CLASS: u8 = 0xff;
 /// The interface subclass for adb.
@@ -149,6 +159,22 @@ impl Interface {
     /// Tells you if the interface carries MTP.
     pub fn is_mtp(&self) -> bool {
         self.class == MTP_CLASS && self.subclass == MTP_SUBCLASS && self.protocol == MTP_PROTOCOL
+    }
+
+    /// Tells you if the interface could carry MTP with a vendor class.
+    ///
+    /// Android gives MTP two shapes. A Samsung SM-S901U uses the still imaging
+    /// class. A Motorola Moto G (5) uses a vendor class, and names the
+    /// interface "MTP".
+    ///
+    /// The class fields alone do not separate this interface from any other
+    /// vendor interface. A caller must read the name of the interface, which
+    /// needs a request to the device. See [`MtpInterface::find_with_names`].
+    pub fn is_vendor_mtp_candidate(&self) -> bool {
+        self.class == VENDOR_CLASS
+            && self.subclass == VENDOR_MTP_SUBCLASS
+            && self.protocol == VENDOR_MTP_PROTOCOL
+            && self.string_index != 0
     }
 
     /// Tells you if the interface carries adb.
@@ -288,18 +314,66 @@ pub struct MtpInterface {
 }
 
 impl MtpInterface {
-    /// Finds the MTP interface of a configuration.
+    /// Finds an MTP interface that uses the still imaging class.
     ///
     /// The function checks the interface class first. A phone with USB
     /// debugging on gives other interfaces that also have bulk endpoints, and
     /// the function must not choose one of them.
+    ///
+    /// The function finds a Samsung SM-S901U. The function does not find a
+    /// Motorola Moto G (5), because that device uses a vendor class. Use
+    /// [`MtpInterface::find_with_names`] to find both.
     pub fn find(cfg: &ConfigDescriptor) -> Result<Self, DescriptorError> {
-        let iface = cfg
+        Self::from_interface(
+            cfg.interfaces
+                .iter()
+                .find(|i| i.is_mtp())
+                .ok_or(DescriptorError::NoMtpInterface)?,
+        )
+    }
+
+    /// Finds an MTP interface, and reads the name of an interface when the
+    /// class alone is not enough.
+    ///
+    /// `name_of` takes a string index and gives the name, or `None`. A caller
+    /// reads the name from the device, which needs a request, so this module
+    /// cannot read the name.
+    ///
+    /// The search order:
+    ///
+    /// 1. An interface with the still imaging class.
+    /// 2. An interface with a vendor class, named "MTP".
+    ///
+    /// The order puts the standard class first, because the standard class
+    /// needs no request.
+    pub fn find_with_names<F>(
+        cfg: &ConfigDescriptor,
+        mut name_of: F,
+    ) -> Result<Self, DescriptorError>
+    where
+        F: FnMut(u8) -> Option<String>,
+    {
+        if let Some(i) = cfg.interfaces.iter().find(|i| i.is_mtp()) {
+            return Self::from_interface(i);
+        }
+
+        for i in cfg
             .interfaces
             .iter()
-            .find(|i| i.is_mtp())
-            .ok_or(DescriptorError::NoMtpInterface)?;
+            .filter(|i| i.is_vendor_mtp_candidate())
+        {
+            if let Some(name) = name_of(i.string_index) {
+                if name.trim() == VENDOR_MTP_NAME {
+                    return Self::from_interface(i);
+                }
+            }
+        }
 
+        Err(DescriptorError::NoMtpInterface)
+    }
+
+    /// Reads the endpoints of one interface.
+    fn from_interface(iface: &Interface) -> Result<Self, DescriptorError> {
         let bulk_in = iface.endpoints.iter().find(|e| e.is_bulk() && e.is_in());
         let bulk_out = iface.endpoints.iter().find(|e| e.is_bulk() && !e.is_in());
 

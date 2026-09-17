@@ -59,11 +59,37 @@ SM-S901U. `crates/ptp-proto/tests/fixtures/README.md` records the source.
 
 ## Test hardware
 
-The project needs reports from many devices. At present the project has one:
+The project needs reports from many devices. At present the project has two,
+and the two disagree about three things:
 
-| Device      | Android | Result                                  |
-| ----------- | ------- | --------------------------------------- |
-| Samsung SM-S901U | 16 | `simple-mtpfs` and `jmtpfs` both stop |
+| Item                    | Samsung SM-S901U | Motorola Moto G (5) |
+| ----------------------- | ---------------- | ------------------- |
+| Android                 | 16               | 8.1                 |
+| MTP interface class     | 0x06/0x01/0x01   | 0xff/0xff/0x00      |
+| The name of the interface | `MTP`          | `MTP`               |
+| Storage on attempt 1    | no, on attempt 2 | yes                 |
+| Super speed capability  | yes              | no                  |
+| Rate, 64 KiB reads      | 32.1 MiB/s       | 28.2 MiB/s          |
+| One open and close cycle | 23 ms           | 270 ms              |
+
+Each difference broke a rule that came from one device:
+
+- The class of the MTP interface. See `docs/05-finding-the-interface.md`.
+- The wait before a storage appears. See `docs/01-cold-start.md`.
+- The report about a cable. See `docs/04-file-transfer.md`.
+
+A third device is more use to this project than a hundred more runs on these
+two.
+
+### How to send a report
+
+```
+cargo build
+sh tools/capture-device.sh <a name for your device>
+```
+
+The script hides each file name. Read the file in `docs/captures` before you
+send the file.
 
 ## Documentation language
 

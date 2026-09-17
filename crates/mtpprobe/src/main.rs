@@ -114,7 +114,43 @@ fn find_mtp(backend: &Backend, quiet: bool) -> Result<(OpenDevice<'_>, MtpInterf
             Err(_) => continue,
         };
 
-        if let Ok(iface) = MtpInterface::find(&cfg) {
+        // Read the name of an interface when the class alone does not say that
+        // the interface carries MTP. A Motorola Moto G (5) needs the name.
+        let debug = std::env::var("BSDROID_DEBUG").is_ok();
+        if debug {
+            println!(
+                "  [debug] device {vid:#06x}:{pid:#06x} has {} interface(s)",
+                cfg.interfaces.len()
+            );
+            for i in &cfg.interfaces {
+                println!(
+                    "  [debug]   iface {} class {:#04x}/{:#04x}/{:#04x} iInterface {} mtp={} vendor_candidate={}",
+                    i.number, i.class, i.subclass, i.protocol, i.string_index,
+                    i.is_mtp(), i.is_vendor_mtp_candidate()
+                );
+            }
+        }
+
+        let mut names: Vec<(u8, Option<String>)> = Vec::new();
+        for i in cfg
+            .interfaces
+            .iter()
+            .filter(|i| i.is_vendor_mtp_candidate())
+        {
+            let n = open.string_descriptor(i.string_index);
+            if debug {
+                println!("  [debug]   string {} = {:?}", i.string_index, n);
+            }
+            names.push((i.string_index, n));
+        }
+        let found = MtpInterface::find_with_names(&cfg, |idx| {
+            names
+                .iter()
+                .find(|(i, _)| *i == idx)
+                .and_then(|(_, n)| n.clone())
+        });
+
+        if let Ok(iface) = found {
             if !quiet {
                 println!();
                 println!("MTP device found:");
@@ -973,11 +1009,10 @@ fn mtp_present(backend: &Backend) -> bool {
             Ok(r) => r,
             Err(_) => continue,
         };
-        if let Ok(cfg) = ConfigDescriptor::parse(&raw) {
-            if MtpInterface::find(&cfg).is_ok() {
-                return true;
-            }
+        if open.find_mtp_interface(TIMEOUT).is_ok() {
+            return true;
         }
+        let _ = raw;
     }
     false
 }

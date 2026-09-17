@@ -615,3 +615,104 @@ fn an_endpoint_before_any_interface_is_an_error() {
         "got {got:?}"
     );
 }
+
+// --- A second make of telephone ---
+//
+// A Motorola Moto G (5) gives MTP with a vendor class, and names the
+// interface "MTP". A Samsung SM-S901U gives MTP with the still imaging class.
+// A host must find both.
+
+#[test]
+fn the_moto_fixture_agrees_with_its_own_header() {
+    let bytes = common::load("moto_g5_mtp_descriptor.hex");
+    assert_eq!(bytes.len(), 62);
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+    assert_eq!(cfg.total_length, 62);
+    assert_eq!(cfg.num_interfaces, 2);
+}
+
+/// This test records why the project reads the name of an interface.
+#[test]
+fn the_class_alone_does_not_find_the_moto_mtp_interface() {
+    let bytes = common::load("moto_g5_mtp_descriptor.hex");
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+
+    // The still imaging class is absent, so the old search gives nothing.
+    assert_eq!(
+        MtpInterface::find(&cfg),
+        Err(DescriptorError::NoMtpInterface)
+    );
+
+    // The interface is there, with a vendor class.
+    let iface = &cfg.interfaces[0];
+    assert_eq!(
+        (iface.class, iface.subclass, iface.protocol),
+        (0xff, 0xff, 0x00)
+    );
+    assert!(iface.is_vendor_mtp_candidate());
+    assert_eq!(iface.string_index, 6);
+}
+
+#[test]
+fn the_name_finds_the_moto_mtp_interface() {
+    let bytes = common::load("moto_g5_mtp_descriptor.hex");
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+
+    let mtp = MtpInterface::find_with_names(&cfg, |idx| match idx {
+        6 => Some("MTP".to_string()),
+        7 => Some("ADB Interface".to_string()),
+        _ => None,
+    })
+    .expect("the name finds the interface");
+
+    assert_eq!(mtp.interface_number, 0);
+    assert_eq!(mtp.bulk_in, 0x81);
+    assert_eq!(mtp.bulk_out, 0x01);
+    assert_eq!(mtp.interrupt_in, Some(0x82));
+}
+
+/// A vendor interface with another name must not be chosen.
+#[test]
+fn a_vendor_interface_with_another_name_is_not_mtp() {
+    let bytes = common::load("moto_g5_mtp_descriptor.hex");
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+
+    let got = MtpInterface::find_with_names(&cfg, |_| Some("Mass Storage".to_string()));
+    assert_eq!(got, Err(DescriptorError::NoMtpInterface));
+
+    let got = MtpInterface::find_with_names(&cfg, |_| None);
+    assert_eq!(got, Err(DescriptorError::NoMtpInterface));
+}
+
+/// The name search must still find a device that uses the standard class, and
+/// must not need a name for it.
+#[test]
+fn the_name_search_still_finds_the_samsung_without_any_name() {
+    let bytes = common::load("s22_config_descriptor.hex");
+    let cfg = ConfigDescriptor::parse(&bytes).expect("the capture must parse");
+
+    let mut asked = false;
+    let mtp = MtpInterface::find_with_names(&cfg, |_| {
+        asked = true;
+        None
+    })
+    .expect("the still imaging class needs no name");
+
+    assert_eq!(mtp.interface_number, 0);
+    assert!(!asked, "a request to the device is not needed here");
+}
+
+/// Both devices give the same endpoints, and the class differs.
+#[test]
+fn both_makes_give_the_same_endpoints() {
+    let samsung = ConfigDescriptor::parse(&common::load("s22_config_descriptor.hex")).unwrap();
+    let moto = ConfigDescriptor::parse(&common::load("moto_g5_mtp_descriptor.hex")).unwrap();
+
+    let a = MtpInterface::find(&samsung).unwrap();
+    let b = MtpInterface::find_with_names(&moto, |_| Some("MTP".to_string())).unwrap();
+
+    assert_eq!(a.bulk_in, b.bulk_in);
+    assert_eq!(a.bulk_out, b.bulk_out);
+    assert_eq!(a.interrupt_in, b.interrupt_in);
+    assert_ne!(a.class, b.class, "the class is the difference");
+}

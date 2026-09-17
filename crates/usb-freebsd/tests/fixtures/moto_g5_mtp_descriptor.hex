@@ -1,0 +1,60 @@
+# USB configuration descriptor, Motorola Moto G (5), file transfer mode.
+#
+# Source command:
+#   usbconfig -d ugen0.11 do_request 0x80 0x06 0x0200 0 256
+#
+# Device state at the moment of the capture:
+#   idVendor            0x22b8 (Motorola)
+#   idProduct           0x2e81
+#   bcdUSB              0x0200, which is plain USB 2.0
+#   BOS descriptor      none, so the device runs at high speed at most
+#   USB mode            file transfer
+#
+# This capture holds the finding that a second make of telephone gave.
+#
+# The MTP interface of this device is NOT the still imaging class. The
+# interface is a vendor class, and the name of the interface is "MTP":
+#
+#   bInterfaceClass     0xff
+#   bInterfaceSubClass  0xff
+#   bInterfaceProtocol  0x00
+#   iInterface          6, and string 6 holds "MTP"
+#
+# A Samsung SM-S901U gives class 0x06, subclass 0x01, protocol 0x01 for the
+# same job. A host that reads only the class finds the Samsung and misses this
+# device.
+#
+# The endpoints are the same in both devices: 0x81 in, 0x01 out, 0x82 for an
+# event.
+
+# --- Configuration descriptor ---
+09          # bLength = 9
+02          # bDescriptorType = 2 (CONFIGURATION)
+3e00        # wTotalLength = 62
+02          # bNumInterfaces = 2
+01          # bConfigurationValue = 1
+00          # iConfiguration = 0
+80          # bmAttributes
+fa          # bMaxPower = 250, which is 500 mA
+
+# --- Interface 0: MTP, with a vendor class ---
+09          # bLength = 9
+04          # bDescriptorType = 4 (INTERFACE)
+00          # bInterfaceNumber = 0
+00          # bAlternateSetting = 0
+03          # bNumEndpoints = 3
+ff          # bInterfaceClass = 0xff (vendor specific)
+ff          # bInterfaceSubClass = 0xff
+00          # bInterfaceProtocol = 0x00
+06          # iInterface = 6. String 6 holds "MTP".
+
+07 05 81 02 0002 00   # endpoint 0x81, bulk. Data from the device.
+07 05 01 02 0002 00   # endpoint 0x01, bulk. Data to the device.
+07 05 82 03 1c00 06   # endpoint 0x82, interrupt. An event from the device.
+
+# --- Interface 1: adb ---
+09 04 01 00 02 ff 42 01 07
+07 05 02 02 0002 00
+07 05 83 02 0002 00
+
+# The lengths add to 62, which agrees with wTotalLength.

@@ -47,6 +47,24 @@ Result:
 The first `GetStorageIDs` after the reset gave response code 0x2001 (OK) and an
 empty list. The second gave one storage.
 
+## The cold start is not a rule for every device
+
+A Motorola Moto G (5) does not do this. The same test, on the same host:
+
+| Device           | Attempts until a storage appeared |
+| ---------------- | --------------------------------- |
+| Samsung SM-S901U | 2                                 |
+| Motorola Moto G (5) | 1                              |
+
+The Motorola answered the first `GetStorageIDs` with a storage, each time.
+
+An earlier version of this document called the cold start a property of
+Android. Two devices now disagree, so the cold start is a property of a device,
+and not of Android.
+
+The retry costs nothing on a device that answers at once. A host must therefore
+still retry, because a host does not know which device it holds.
+
 ## Why the empty list is not an error
 
 The MTP service on the device starts after the USB interface starts. The device

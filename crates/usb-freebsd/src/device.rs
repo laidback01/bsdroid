@@ -496,11 +496,65 @@ impl<'a> OpenDevice<'a> {
         Ok(DeviceCapabilities::parse(&raw)?)
     }
 
+    /// Reads a string descriptor by index.
+    ///
+    /// The function gives `None` when the device gives no string. A string
+    /// index of 0 means the device gives no name, so the function gives `None`
+    /// for index 0 without a request.
+    pub fn string_descriptor(&mut self, index: u8) -> Option<String> {
+        if index == 0 {
+            return None;
+        }
+        let mut buf = [0u8; 256];
+
+        // SAFETY: the buffer holds 256 bytes, and the length argument says so.
+        // The library writes a C string, and the library ends the string.
+        let rc = unsafe {
+            sys::libusb20_dev_req_string_simple_sync(
+                self.dev,
+                index,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as u16,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+
+        let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+        match core::str::from_utf8(&buf[..end]) {
+            Ok(s) if !s.is_empty() => Some(s.to_string()),
+            _ => None,
+        }
+    }
+
     /// Reads the configuration descriptor and finds the MTP interface.
+    ///
+    /// The function reads the name of an interface when the class alone does
+    /// not say that the interface carries MTP. A Motorola Moto G (5) needs the
+    /// name, and a Samsung SM-S901U does not.
     pub fn find_mtp_interface(&mut self, timeout: Duration) -> Result<MtpInterface, UsbError> {
         let raw = self.config_descriptor_raw(timeout)?;
         let cfg = ConfigDescriptor::parse(&raw)?;
-        Ok(MtpInterface::find(&cfg)?)
+
+        // The closure needs the device, and `find_with_names` borrows the
+        // closure. Read every name the search could need first.
+        let mut names: Vec<(u8, Option<String>)> = Vec::new();
+        for i in cfg
+            .interfaces
+            .iter()
+            .filter(|i| i.is_vendor_mtp_candidate())
+        {
+            let name = self.string_descriptor(i.string_index);
+            names.push((i.string_index, name));
+        }
+
+        Ok(MtpInterface::find_with_names(&cfg, |idx| {
+            names
+                .iter()
+                .find(|(i, _)| *i == idx)
+                .and_then(|(_, n)| n.clone())
+        })?)
     }
 
     /// Sends a class request to an interface, with no data.
