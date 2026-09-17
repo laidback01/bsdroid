@@ -30,6 +30,29 @@ at high speed, which is 480 Mbit each second.
 A small file gives a low rate, because the operation cost does not change with
 the size.
 
+### A later reading, on a direct port
+
+The reading above went through a chain of hubs. A later reading used the same
+cellphone on a port of the host, with `mtpprobe bench`:
+
+| File size | Read size | Reads | Rate       | Of the estimate |
+| --------- | --------- | ----- | ---------- | --------------- |
+| 141717    | 4 KiB     | 35    | 13.2 MiB/s | 33%             |
+| 141717    | 256 KiB   | 1     | 18.7 MiB/s | 47%             |
+| 5484928   | 16 KiB    | 335   | 41.0 MiB/s | 102%            |
+| 39836894  | 64 KiB    | 608   | 42.7 MiB/s | 107%            |
+| 39836894  | 256 KiB   | 152   | 42.7 MiB/s | 107%            |
+
+The estimate is the one `LinkSpeed::practical_bytes_per_second` holds for a
+high speed link, which is 42 MB each second.
+
+A read of a large file therefore reaches the practical limit of the link. The
+limit is the link, and not MTP. The chain of hubs cost about 10 MiB each
+second, which is the difference between the two readings.
+
+The rate does not rise above 16 KiB of read size. A larger read saves round
+trips, and by 16 KiB there are few enough round trips left to save.
+
 ## The check
 
 A size that agrees is not a proof. Two files of the same size hold different

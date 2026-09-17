@@ -59,6 +59,66 @@ worth doing, but by someone who would be aware of what all this shim affects.
 This project took the other road just because I didn't want to try and wrangle
 that!
 
+### Why not adb, or one of the wireless things?
+
+Every time I post this, someone suggests a different tool. They are all decent
+suggestions and most of them solve a different problem than mine.
+
+**adb.** Works well, and I use it in the tests here as the reference: a read
+over MTP is compared against a copy over `adb`, by SHA-256 sum. Two things it
+does not do for me. It needs developer options turned on, which I do not want
+standing on for a phone that just holds photos, and it is not a filesystem, so
+Nautilus cannot see it. You can build a shell around it, and then you have
+built this, with an extra thing enabled on the phone.
+
+**Immich, Syncthing, PhotoSync, KDEConnect, photoprism.** These are continuous
+sync. They are good at that, and if you want your photos to arrive on a server
+by themselves, use one of them. They need a server, or an account, or the
+network. I wanted to plug a cable in and look at a folder. It also works for a
+phone that is not mine, with nothing installed on it.
+
+**Copy to a USB drive first.** Honest answer, and it does avoid the problem.
+
+So this is for one job: connect a cellphone, and browse it in the file manager
+you already run. No daemon, no server, no account, no network, nothing
+installed on the phone, and nothing enabled beyond file transfer mode in the
+notification shade. FUSE is how you get that on FreeBSD, and it means the
+result works the same under Nautilus, Dolphin or Thunar.
+
+### "MTP is slow and fragile"
+
+I hear this a lot. The measurements here do not agree.
+
+Slow: a read of a 39 MB file reached 42.7 MiB each second, which is the
+practical limit of a USB 2.0 high speed link. The link is the limit, not the
+protocol. See `docs/04-file-transfer.md`.
+
+Fragile: that reputation is earned, but not by MTP. Two things earn it. The
+first is the compatibility layer above, which cannot set a deadline. The
+second is a list of about a dozen device habits that a host must handle, and
+which I have not found written down anywhere else:
+
+- a storage list that is empty for the first moment after a connect
+- `GetObjectHandles`, where 0x00000000 and 0xffffffff swap meaning by device
+- a packet of zero bytes, needed when a data phase ends on a packet boundary
+- a cellphone that drops the last byte when a partial read ends on 512
+- a session that an earlier program left open
+- an endpoint that needs a drain before the first command
+- MTP behind a vendor class, which you can only name by reading a string
+- a fast folder listing that some devices refuse
+- a cellphone on the bus one or two seconds before its MTP interface is
+- charge only mode, which looks the same as file transfer until you ask for
+  the storage
+
+Handle those and MTP is neither slow nor fragile. Miss one and it looks like
+both. The files in `docs/` hold the measurement for each.
+
+A person pulled the cable, changed the USB mode, and moved the cellphones
+between ports while this ran, on three cellphones at once, including a cable
+with a bad contact. 583 writes of 24 MiB went out and came back with the same
+bytes, no command failed to return, and nothing was lost in silence. See
+`docs/10-what-works.md`.
+
 ### Does this use libmtp?
 
 No. This project holds its own MTP code, in `crates/ptp-proto`.
