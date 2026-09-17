@@ -5,4 +5,5 @@
 //!
 //! See `docs/07-filesystem-design.md`.
 
+pub mod backend;
 pub mod tree;

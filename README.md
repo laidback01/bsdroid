@@ -33,7 +33,25 @@ controls.
 | ------------- | -------------------------------------------- | --------------- |
 | `ptp-proto`   | PTP wire format. No I/O and no dependency.   | tests pass      |
 | `usb-freebsd` | USB transport over `libusb20`.               | tests pass      |
-| `mtpprobe`    | Reports what a device does, and where it stops. | works on one phone |
+| `mtpprobe`    | Reports what a device does, and where it stops. | works on three phones |
+| `mtpfs`       | Mounts a device as a folder. Read only.      | reads verified  |
+
+## mtpfs
+
+```
+cargo build
+./target/debug/mtpfs /path/to/a/folder
+```
+
+The mount is read only. A read gives the same bytes as a copy over `adb`, and
+a test compares a SHA-256 sum.
+
+To stop the mount:
+
+```
+umount /path/to/a/folder
+```
+
 
 ## mtpprobe
 

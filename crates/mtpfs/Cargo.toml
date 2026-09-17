@@ -14,3 +14,7 @@ usb-freebsd = { path = "../usb-freebsd" }
 [lib]
 name = "mtpfs"
 path = "src/lib.rs"
+
+[[bin]]
+name = "mtpfs"
+path = "src/main.rs"
