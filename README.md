@@ -124,11 +124,17 @@ thing you can send. See `docs/08-what-libmtp-knows.md`.
 | Make a folder          | yes   |
 | Remove a file          | yes   |
 | Remove a folder        | yes   |
-| Rename                 | no    |
+| Rename a file          | yes   |
+| Move a file            | yes   |
+| Report the free space  | yes   |
 | Change a file in place | no    |
 
 A read gives the same bytes as a copy over `adb`. A test compares a SHA-256
 sum, for a file of 290 KB and for a file of 450 MB.
+
+`cp -p` works. MTP holds no time, no mode and no owner, so the filesystem
+accepts each request and changes nothing. A fault there stops a copy, and a
+copy is the job.
 
 ## Build and use
 

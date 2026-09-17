@@ -237,6 +237,14 @@ impl<'a> Container<'a> {
 
 /// Writes a PTP string into a buffer.
 ///
+/// A caller outside this crate needs the function for the value of an object
+/// property, which is a string with no dataset around it.
+pub fn push_ptp_string(out: &mut Vec<u8>, s: &str) {
+    push_string(out, s)
+}
+
+/// Writes a PTP string into a buffer.
+///
 /// The first byte holds the character count, and the count includes the
 /// terminator. The characters are UTF-16 little-endian. An empty string gives
 /// one byte of 0, and no characters.

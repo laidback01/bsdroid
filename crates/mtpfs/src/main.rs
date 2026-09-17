@@ -123,6 +123,14 @@ fn main() -> std::process::ExitCode {
     ops.mkdir = Some(op_mkdir);
     ops.rmdir = Some(op_rmdir);
     ops.truncate = Some(op_truncate);
+    ops.statfs = Some(op_statfs);
+    ops.rename = Some(op_rename);
+    // A program that copies a file asks for these three. MTP holds none of
+    // them, and a fault here stops the copy. The filesystem therefore accepts
+    // each one and changes nothing.
+    ops.utimens = Some(op_utimens);
+    ops.chmod = Some(op_chmod);
+    ops.chown = Some(op_chown);
 
     // The mount runs in one thread. The option `-s` says so.
     let mut argv: Vec<CString> = Vec::new();
@@ -328,6 +336,139 @@ unsafe extern "C" fn op_open(path: *const i8, fi: *mut sys::fuse_file_info) -> i
     if !fi.is_null() {
         unsafe { (*fi).fh = u64::from(handle) };
     }
+    0
+}
+
+/// Reports the size and the free space of the storage.
+///
+/// A program that copies a file asks for the free space first, and a fault
+/// here stops the copy. `df` also needs this answer.
+unsafe extern "C" fn op_statfs(_path: *const i8, st: *mut sys::statvfs) -> i32 {
+    let mut guard = FS.lock().unwrap();
+    let fs = match guard.0.as_mut() {
+        Some(f) => f,
+        None => return -libc_eio(),
+    };
+
+    let (total, free) = match fs.mtp.storage_info() {
+        Ok(v) => v,
+        Err(_) => return -libc_eio(),
+    };
+
+    // A block of 4096 bytes gives a count that fits, for a storage of any
+    // size a cellphone holds.
+    let block = 4096u64;
+
+    // SAFETY: FUSE gives a buffer for one statvfs.
+    unsafe {
+        core::ptr::write_bytes(st, 0, 1);
+        (*st).f_bsize = block as core::ffi::c_ulong;
+        (*st).f_frsize = block as core::ffi::c_ulong;
+        (*st).f_blocks = (total / block) as sys::fsblkcnt_t;
+        (*st).f_bfree = (free / block) as sys::fsblkcnt_t;
+        (*st).f_bavail = (free / block) as sys::fsblkcnt_t;
+        (*st).f_namemax = 255;
+    }
+    0
+}
+
+/// Gives an object a new name, and moves the object to another folder.
+unsafe extern "C" fn op_rename(from: *const i8, to: *const i8, _flags: u32) -> i32 {
+    let from = path_of(from);
+    let to = path_of(to);
+    let mut guard = FS.lock().unwrap();
+    let fs = match guard.0.as_mut() {
+        Some(f) => f,
+        None => return -libc_eio(),
+    };
+
+    let handle = match resolve(fs, &from) {
+        Some(h) => h,
+        None => return -libc_enoent(),
+    };
+    if handle == ROOT {
+        return -libc_eio();
+    }
+
+    let (old_dir, _) = split_parent(&from);
+    let (new_dir, new_name) = split_parent(&to);
+    if new_name.is_empty() {
+        return -libc_eio();
+    }
+
+    let old_parent = match resolve(fs, &old_dir) {
+        Some(h) => h,
+        None => return -libc_enoent(),
+    };
+    let new_parent = match resolve(fs, &new_dir) {
+        Some(h) => h,
+        None => return -libc_enoent(),
+    };
+
+    // A move to another folder comes first, because a name in the new folder
+    // must not meet a name in the old one.
+    if new_parent != old_parent {
+        if !fs.mtp.can_move() {
+            return -libc_enotsup();
+        }
+        if let Err(e) = fs.mtp.move_object(handle, new_parent) {
+            eprintln!("mtpfs: cannot move {from}: {e}");
+            return -libc_eio();
+        }
+    }
+
+    let old_name = fs
+        .tree
+        .get(handle)
+        .map(|e| e.name.clone())
+        .unwrap_or_default();
+    if old_name != new_name {
+        if !fs.mtp.can_rename() {
+            return -libc_enotsup();
+        }
+        if let Err(e) = fs.mtp.rename_object(handle, &new_name) {
+            eprintln!("mtpfs: cannot rename {from}: {e}");
+            return -libc_eio();
+        }
+    }
+
+    fs.tree.forget_listing(old_parent);
+    fs.tree.forget_listing(new_parent);
+    0
+}
+
+/// Accepts a change of time, and changes nothing.
+///
+/// MTP holds no time that a host can set. A fault here stops `cp -p` and each
+/// program that copies a time.
+unsafe extern "C" fn op_utimens(
+    _path: *const i8,
+    _tv: *const sys::timespec,
+    _fi: *mut sys::fuse_file_info,
+) -> i32 {
+    0
+}
+
+/// Accepts a change of mode, and changes nothing.
+///
+/// MTP holds no mode. A fault here stops `cp -p`.
+unsafe extern "C" fn op_chmod(
+    _path: *const i8,
+    _mode: sys::mode_t,
+    _fi: *mut sys::fuse_file_info,
+) -> i32 {
+    0
+}
+
+/// Accepts a change of owner, and changes nothing.
+///
+/// MTP holds no owner. A fault here stops `cp -p`.
+unsafe extern "C" fn op_chown(
+    _path: *const i8,
+    _uid: sys::uid_t,
+    _gid: sys::gid_t,
+    _fi: *mut sys::fuse_file_info,
+) -> i32 {
     0
 }
 
@@ -606,4 +747,7 @@ fn libc_erofs() -> i32 {
 }
 fn libc_enotdir() -> i32 {
     20
+}
+fn libc_enotsup() -> i32 {
+    45
 }

@@ -66,6 +66,12 @@ const OP_GET_DEVICE_INFO: u16 = 0x1001;
 const OP_SEND_OBJECT_INFO: u16 = 0x100c;
 const OP_SEND_OBJECT: u16 = 0x100d;
 const OP_DELETE_OBJECT: u16 = 0x100b;
+const OP_MOVE_OBJECT: u16 = 0x1019;
+const OP_GET_STORAGE_INFO: u16 = 0x1005;
+const OP_SET_OBJECT_PROP_VALUE: u16 = 0x9804;
+
+/// The object property that holds the name of a file.
+const PROP_OBJECT_FILE_NAME: u16 = 0xdc07;
 
 /// Response code for success.
 const RESP_OK: u16 = 0x2001;
@@ -461,6 +467,67 @@ impl Mtp {
         }
         self.cache = None;
         Ok(handle)
+    }
+
+    /// Reads the size and the free space of the storage.
+    pub fn storage_info(&mut self) -> Result<(u64, u64), Error> {
+        let data = self.operation("GetStorageInfo", OP_GET_STORAGE_INFO, &[self.storage])?;
+        let info = ptp_proto::StorageInfo::parse(&data)?;
+        Ok((info.max_capacity, info.free_space_in_bytes))
+    }
+
+    /// Gives an object a new name, in the same folder.
+    pub fn rename_object(&mut self, handle: u32, name: &str) -> Result<(), Error> {
+        // The value of the property is a PTP string, with no dataset around it.
+        let mut payload = Vec::new();
+        ptp_proto::push_ptp_string(&mut payload, name);
+
+        let (code, _) = self.operation_with_data(
+            "SetObjectPropValue",
+            OP_SET_OBJECT_PROP_VALUE,
+            &[handle, u32::from(PROP_OBJECT_FILE_NAME)],
+            &payload,
+        )?;
+        if code != RESP_OK {
+            return Err(Error::Device {
+                step: "SetObjectPropValue",
+                code,
+            });
+        }
+        self.cache = None;
+        Ok(())
+    }
+
+    /// Moves an object to another folder.
+    pub fn move_object(&mut self, handle: u32, new_parent: u32) -> Result<(), Error> {
+        let parent_arg = if new_parent == ROOT {
+            0xffff_ffff
+        } else {
+            new_parent
+        };
+        let (code, _) = self.operation_code(
+            "MoveObject",
+            OP_MOVE_OBJECT,
+            &[handle, self.storage, parent_arg],
+        )?;
+        if code != RESP_OK {
+            return Err(Error::Device {
+                step: "MoveObject",
+                code,
+            });
+        }
+        self.cache = None;
+        Ok(())
+    }
+
+    /// Tells you if the device can give an object a new name.
+    pub fn can_rename(&self) -> bool {
+        self.info.supports(OP_SET_OBJECT_PROP_VALUE)
+    }
+
+    /// Tells you if the device can move an object to another folder.
+    pub fn can_move(&self) -> bool {
+        self.info.supports(OP_MOVE_OBJECT)
     }
 
     /// Removes an object from the device.
