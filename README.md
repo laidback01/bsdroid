@@ -8,17 +8,19 @@ A FreeBSD desktop does not get on well with a modern Android cellphone. You
 connect the cellphone, you try to mount it, and the mount stops. The mount
 point then gives an error for each command, and one CPU core runs at 100%.
 
-This project began with mild frustration at that, after several years of it.
-
-The author used the programs below over that time, and met the same trouble
-each time. On the day this project started, `simple-mtpfs` left a mount point
-in this state:
+I've used jmtpfs, simple-mtpfs, and tried aft-mtp-mount. On the day this
+project started, `simple-mtpfs` left a mount point in this state:
 
 ```
 d---------   0 root wheel  0 Dec 31  1969 phone
 ```
 
-No command read the folder. No signal stopped the program.
+well... that's great.
+To be VERY CLEAR: I'm not a developer, I'm mostly a system admin who breaks
+things, sometimes fixes them. I leave the development to the real coders, or in
+this case AI! This code is 100% AI written, if you don't like that, oh well.
+It's good code so far as a simple admin can tell. Famous last words: it works
+for me!
 
 ### The state of things
 
@@ -51,8 +53,10 @@ system, which is the native USB library, and which gives a deadline that the
 caller controls. The USB code and the MTP code here are new.
 
 That is not a criticism of the other programs. A repair of the compatibility
-layer helps every program on FreeBSD, and the repair is still worth doing. This
-project took the other road.
+layer affects every program on FreeBSD which uses it... The repair is still
+worth doing, but by someone who would be aware of what all this shim affects.
+This project took the other road just because I didn't want to try and wrangle
+that!
 
 ## What works now
 
@@ -124,9 +128,9 @@ send the file.
 
 ## How this was built
 
-A person and Claude Code wrote this together, over one long session. The person
-supplied the cellphones, the cables, the hands, and the questions that broke
-the wrong answers.
+Claude Code and I wrote this together, over one long session. I supplied the
+cellphones, the cables, the hands, and the questions that broke the wrong
+answers... basically, I was the on-site person for a remote coder.
 
 Several documents in `docs/` record a correction. The project measured one
 device, drew a rule, met a second device, and found the rule wrong. Some of the
@@ -147,9 +151,12 @@ faults were in this project, and each document says so.
 | `docs/08-what-libmtp-knows.md`     | What the `libmtp` database already knew     |
 | `docs/09-the-other-tools.md`       | The measurements of the other programs      |
 
-The documentation uses Simplified Technical English (ASD-STE100), because many
-readers of this project read English as a second language.
-`tools/lint-docs.sh` checks the rules.
+The files in `docs/` use Simplified Technical English (ASD-STE100), because
+many readers of this project read English as a second language.
+`tools/lint-docs.sh` checks each one.
+
+This README is not checked. A reference document needs a plain rule. A person
+who tells you why the person wrote a program needs a voice.
 
 ## Tests
 
