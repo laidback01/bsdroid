@@ -117,6 +117,52 @@ impl Settings {
     }
 }
 
+/// The count of times the host looks for a device before it gives up.
+///
+/// A cellphone reaches the bus before its MTP interface does. A host that
+/// looks one time, in the moment between the two, reports that no device
+/// gives an MTP interface, and the same cellphone is ready a second later.
+///
+/// Measured on three cellphones, with the USB mode changed by hand. The host
+/// read the product identifier of a device, and then waited for the MTP
+/// interface to appear:
+///
+/// | Device     | The wait |
+/// | ---------- | -------- |
+/// | 04e8:6865  | 2 s      |
+/// | 0e8d:2008  | 1 s      |
+/// | 22b8:2e82  | 1 s      |
+///
+/// `docs/01-cold-start.md` holds a different wait, for the storage list of a
+/// device that already answers. This one is the interface itself.
+const FIND_ATTEMPTS: u32 = 5;
+
+/// The wait between two looks for a device.
+const FIND_WAIT: Duration = Duration::from_millis(700);
+
+/// Looks for a device, and gives a new cellphone time to finish its work.
+///
+/// The function gives up after [`FIND_ATTEMPTS`], so a host with no cellphone
+/// reports that in about 3 seconds and not never.
+fn find_with_patience(
+    backend: &Rc<UsbBackend>,
+    want: Option<discover::Selector>,
+    settings: Settings,
+) -> Option<discover::Found> {
+    for attempt in 1..=FIND_ATTEMPTS {
+        if let Some(found) = discover::find(backend, want, settings.timeout) {
+            if attempt > 1 && settings.debug {
+                eprintln!("mtpfs: the device gave an MTP interface on attempt {attempt}");
+            }
+            return Some(found);
+        }
+        if attempt < FIND_ATTEMPTS {
+            std::thread::sleep(FIND_WAIT);
+        }
+    }
+    None
+}
+
 /// A fault the filesystem reports.
 #[derive(Debug)]
 pub enum Error {
@@ -381,7 +427,7 @@ impl Mtp {
         // the device and made two `&'static` references with `unsafe`.
         let backend = Rc::new(UsbBackend::new()?);
 
-        let found = discover::find(&backend, want, settings.timeout).ok_or_else(|| match node {
+        let found = find_with_patience(&backend, want, settings).ok_or_else(|| match node {
             Some(n) => Error::NamedDeviceNotFound(n.to_string()),
             None => Error::NoDevice,
         })?;

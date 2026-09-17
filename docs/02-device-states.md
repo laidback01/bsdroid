@@ -437,3 +437,60 @@ holds files, and a cellphone in tethering mode does not.
 
 Use a node name for one command that you watch. Use the identifiers in a
 script, and for any command that must reach the same cellphone twice.
+
+## A cellphone reaches the bus before its MTP interface does
+
+A person changed the USB mode of three cellphones by hand. A watcher read two
+things each second: the product identifier of each device, and the list of
+devices that offer MTP.
+
+Three times, a device held a product identifier and gave no MTP interface, and
+the same device gave one a moment later:
+
+| Device    | The wait |
+| --------- | -------- |
+| 04e8:6865 | 2 s      |
+| 0e8d:2008 | 1 s      |
+| 22b8:2e82 | 1 s      |
+
+### The sequence a user follows
+
+1. Plug the cellphone in. It comes up in charge only mode.
+2. Choose file transfer mode on the cellphone.
+3. The cellphone leaves the bus and comes back with a new product identifier.
+4. For one or two seconds, the cellphone is on the bus and gives no MTP
+   interface.
+5. A host that looks one time in that window reports that no device gives an
+   MTP interface.
+
+The cellphone is ready a second later. `mtpfs` therefore looks five times,
+700 ms apart, before it gives up.
+
+### A measurement that did not work
+
+A first test unplugged a cellphone and measured the time from the bus to the
+MTP interface. The answer was 57 seconds.
+
+That number is the time a person took to pick up the cellphone and choose file
+transfer mode. These cellphones come back from a cable pull in charge only
+mode, so the test measured a person and not a bus.
+
+The mode change is the right test, because the cellphone does that work
+without a person.
+
+## Each cellphone holds more than one product identifier
+
+The same watcher recorded every product identifier each cellphone gave:
+
+| Cellphone           | Gives MTP                  | Gives no MTP interface     |
+| ------------------- | -------------------------- | -------------------------- |
+| Samsung SM-S901U    | 04e8:6860, 04e8:6865       | 04e8:6863, 04e8:686c       |
+| Cyrus CS 24         | 0e8d:2008, 0e8d:200b       | 0e8d:2004, 0e8d:2046       |
+| Motorola Moto G (5) | 22b8:2e82, 22b8:2e83       | none seen                  |
+
+Every cellphone gives at least two identifiers that offer MTP. The table
+earlier in this file holds four identifiers for one cellphone, and this one
+holds ten for three.
+
+A pair of identifiers therefore names one cellphone in one mode, and a
+cellphone has more than one mode that carries MTP.
