@@ -10,3 +10,6 @@ repository.workspace = true
 # This crate has no dependencies, and it must keep no dependencies.
 # The crate does no I/O. A test runs it without a device.
 [dependencies]
+
+[dev-dependencies]
+hex-fixture = { path = "../hex-fixture" }

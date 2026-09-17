@@ -1,0 +1,11 @@
+[package]
+name = "hex-fixture"
+description = "Reads a capture fixture: annotated hexadecimal bytes in a text file."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A test support crate. No program depends on it.
+[dependencies]

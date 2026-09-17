@@ -46,6 +46,12 @@ const PTP_DEVICE_RESET_REQUEST: u8 = 0x66;
 /// of `wValue`.
 const DESCRIPTOR_TYPE_BOS: u16 = 0x0f00;
 
+/// The largest BOS descriptor the module reads, in bytes.
+const BOS_DESCRIPTOR_MAX: usize = 256;
+
+/// Request type: host to device, class, interface.
+const REQUEST_TYPE_OUT_CLASS_INTERFACE: u8 = 0x21;
+
 /// What a transfer did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStatus {
@@ -425,35 +431,47 @@ impl OpenDevice {
         LinkSpeed::from_wire(unsafe { sys::libusb20_dev_get_speed(self.dev) })
     }
 
-    /// Reads the raw configuration descriptor with a control request.
+    /// Does one control request, and gives what the device sent.
     ///
-    /// The function gives the bytes to the caller. The `descriptor` module then
-    /// parses the bytes, and a test covers the parser with no device.
-    pub fn config_descriptor_raw(&mut self, timeout: Duration) -> Result<Vec<u8>, UsbError> {
+    /// The three control requests of this module differ only in the request
+    /// type, the request, the value, and the size of the buffer. An earlier
+    /// version wrote the whole setup block three times, which meant three
+    /// copies of an `unsafe` block to keep right.
+    ///
+    /// `capacity` is 0 for a request that carries no data.
+    fn control_request(
+        &mut self,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        capacity: usize,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, UsbError> {
         let ms = timeout_millis(timeout)?;
-        let mut buf = vec![0u8; CONFIG_DESCRIPTOR_MAX];
+        let mut buf = vec![0u8; capacity];
+        let mut actual: u16 = 0;
 
         // SAFETY: the setup struct is plain data. The format field must point
         // at the format the library gives, which is what LIBUSB20_INIT does in
-        // C. The data buffer holds `buf.len()` bytes, and `wLength` says so.
-        let mut actual: u16 = 0;
+        // C. The data buffer holds `capacity` bytes, and `wLength` says so. A
+        // request with no data gives a null pointer and a length of 0.
         let rc = unsafe {
             let mut setup: sys::LIBUSB20_CONTROL_SETUP_DECODED = core::mem::zeroed();
             setup.LIBUSB20_CONTROL_SETUP_FORMAT = sys::LIBUSB20_CONTROL_SETUP_FORMAT.as_ptr();
-            setup.bmRequestType = REQUEST_TYPE_IN_STANDARD_DEVICE;
-            setup.bRequest = REQUEST_GET_DESCRIPTOR;
-            setup.wValue = DESCRIPTOR_TYPE_CONFIGURATION;
-            setup.wIndex = 0;
-            setup.wLength = buf.len() as u16;
+            setup.bmRequestType = request_type;
+            setup.bRequest = request;
+            setup.wValue = value;
+            setup.wIndex = index;
+            setup.wLength = capacity as u16;
 
-            sys::libusb20_dev_request_sync(
-                self.dev,
-                &mut setup,
-                buf.as_mut_ptr() as *mut c_void,
-                &mut actual,
-                ms,
-                0,
-            )
+            let data = if capacity == 0 {
+                ptr::null_mut()
+            } else {
+                buf.as_mut_ptr() as *mut c_void
+            };
+
+            sys::libusb20_dev_request_sync(self.dev, &mut setup, data, &mut actual, ms, 0)
         };
 
         if rc != 0 {
@@ -463,6 +481,21 @@ impl OpenDevice {
         Ok(buf)
     }
 
+    /// Reads the raw configuration descriptor with a control request.
+    ///
+    /// The function gives the bytes to the caller. The `descriptor` module then
+    /// parses the bytes, and a test covers the parser with no device.
+    pub fn config_descriptor_raw(&mut self, timeout: Duration) -> Result<Vec<u8>, UsbError> {
+        self.control_request(
+            REQUEST_TYPE_IN_STANDARD_DEVICE,
+            REQUEST_GET_DESCRIPTOR,
+            DESCRIPTOR_TYPE_CONFIGURATION,
+            0,
+            CONFIG_DESCRIPTOR_MAX,
+            timeout,
+        )
+    }
+
     /// Reads the raw BOS descriptor with a control request.
     ///
     /// BOS means binary device object store. The descriptor says what the
@@ -470,37 +503,14 @@ impl OpenDevice {
     /// link. A device that has no BOS descriptor answers with a fault, and
     /// that answer means the device runs at high speed at most.
     pub fn bos_descriptor_raw(&mut self, timeout: Duration) -> Result<Vec<u8>, UsbError> {
-        let ms = timeout_millis(timeout)?;
-        let mut buf = vec![0u8; 256];
-        let mut actual: u16 = 0;
-
-        // SAFETY: the setup struct is plain data, and the format field points
-        // at the format the library gives. The buffer holds `buf.len()` bytes,
-        // and `wLength` says so.
-        let rc = unsafe {
-            let mut setup: sys::LIBUSB20_CONTROL_SETUP_DECODED = core::mem::zeroed();
-            setup.LIBUSB20_CONTROL_SETUP_FORMAT = sys::LIBUSB20_CONTROL_SETUP_FORMAT.as_ptr();
-            setup.bmRequestType = REQUEST_TYPE_IN_STANDARD_DEVICE;
-            setup.bRequest = REQUEST_GET_DESCRIPTOR;
-            setup.wValue = DESCRIPTOR_TYPE_BOS;
-            setup.wIndex = 0;
-            setup.wLength = buf.len() as u16;
-
-            sys::libusb20_dev_request_sync(
-                self.dev,
-                &mut setup,
-                buf.as_mut_ptr() as *mut c_void,
-                &mut actual,
-                ms,
-                0,
-            )
-        };
-
-        if rc != 0 {
-            return Err(UsbError::Control(rc));
-        }
-        buf.truncate(actual as usize);
-        Ok(buf)
+        self.control_request(
+            REQUEST_TYPE_IN_STANDARD_DEVICE,
+            REQUEST_GET_DESCRIPTOR,
+            DESCRIPTOR_TYPE_BOS,
+            0,
+            BOS_DESCRIPTOR_MAX,
+            timeout,
+        )
     }
 
     /// Reads what the device says it can do.
@@ -552,34 +562,14 @@ impl OpenDevice {
         interface: u8,
         timeout: Duration,
     ) -> Result<(), UsbError> {
-        let ms = timeout_millis(timeout)?;
-        let mut actual: u16 = 0;
-
-        // SAFETY: the setup struct is plain data, and the format field points
-        // at the format the library gives. The request carries no data, so the
-        // data pointer is null and `wLength` is 0.
-        let rc = unsafe {
-            let mut setup: sys::LIBUSB20_CONTROL_SETUP_DECODED = core::mem::zeroed();
-            setup.LIBUSB20_CONTROL_SETUP_FORMAT = sys::LIBUSB20_CONTROL_SETUP_FORMAT.as_ptr();
-            setup.bmRequestType = 0x21;
-            setup.bRequest = request;
-            setup.wValue = value;
-            setup.wIndex = u16::from(interface);
-            setup.wLength = 0;
-
-            sys::libusb20_dev_request_sync(
-                self.dev,
-                &mut setup,
-                ptr::null_mut(),
-                &mut actual,
-                ms,
-                0,
-            )
-        };
-
-        if rc != 0 {
-            return Err(UsbError::Control(rc));
-        }
+        self.control_request(
+            REQUEST_TYPE_OUT_CLASS_INTERFACE,
+            request,
+            value,
+            u16::from(interface),
+            0,
+            timeout,
+        )?;
         Ok(())
     }
 
@@ -701,6 +691,11 @@ impl MtpDevice {
     /// The speed of the link to the device.
     pub fn speed(&self) -> LinkSpeed {
         self.device.speed()
+    }
+
+    /// Reads what the device says it can do, from the BOS descriptor.
+    pub fn capabilities(&mut self, timeout: Duration) -> Result<DeviceCapabilities, UsbError> {
+        self.device.capabilities(timeout)
     }
 
     /// Resets the device.

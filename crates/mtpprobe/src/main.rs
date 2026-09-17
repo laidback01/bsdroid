@@ -68,6 +68,76 @@ fn start_session(
     Ok((s, open))
 }
 
+/// Everything a command needs to talk to one device.
+///
+/// An earlier version repeated these steps in six commands. The block that
+/// sends the device reset request, with its ten lines of comment, was pasted
+/// four times. One command left the reset out, and nothing said whether that
+/// was a decision or a copy that went wrong.
+struct Connected {
+    session: Session,
+    /// The first storage, or 0 when the caller asked for none.
+    storage: u32,
+    /// What `OpenSession` answered.
+    opened: SessionOpen,
+    /// How long the storage list took to fill.
+    wait: Option<StorageWait>,
+}
+
+/// Opens a device, opens a session, and waits for the storage list to fill.
+///
+/// `quiet` stops the report about the device. `needs_storage` is false for a
+/// command that reads what the device can do and touches no file.
+fn connect(node: Option<Node>, quiet: bool, needs_storage: bool) -> Result<Connected, String> {
+    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
+    let (mut open, iface) = find_mtp(&backend, node, quiet)?;
+
+    if open.kernel_driver_active(iface.interface_number) {
+        if !quiet {
+            println!("  a kernel driver holds the interface, and the probe detaches it");
+        }
+        let _ = open.detach_kernel_driver(iface.interface_number);
+    }
+
+    // The device reset request repairs a device that a stopped program left in
+    // a bad state. The request also breaks a device that works.
+    //
+    // A Cyrus CS 24 in PTP mode passed 4 runs of 5 without the request, and
+    // 1 run of 5 with it. A Samsung SM-S901U needed the request to answer at
+    // all. The request is therefore a repair, and not a step for each open.
+    //
+    // See docs/06-the-reset-that-breaks.md.
+    if std::env::var_os("BSDROID_PTP_RESET").is_some() {
+        println!("    the host sends a device reset request");
+        if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
+            println!("    the device reset request failed: {e}");
+        }
+    }
+
+    let device = open
+        .into_mtp(&iface, BULK_BUFFER)
+        .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
+    let (mut session, opened) = start_session(device, &iface, 1)?;
+
+    let (storage, wait) = if needs_storage {
+        let w = wait_for_storage(&mut session)?;
+        if w.ids.is_empty() {
+            report_no_storage(&w);
+            return Err("the device reports 0 storages".to_string());
+        }
+        (w.ids[0], Some(w))
+    } else {
+        (0, None)
+    };
+
+    Ok(Connected {
+        session,
+        storage,
+        opened,
+        wait,
+    })
+}
+
 /// The count of cycles the reopen test does, if the user gives no count.
 const DEFAULT_CYCLES: u32 = 20;
 
@@ -281,40 +351,12 @@ fn no_mtp_message(backend: &Rc<Backend>, node: Option<Node>) -> String {
 
 /// Reads the device one time.
 fn probe(node: Option<Node>) -> Result<(), String> {
-    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
-    let (mut open, iface) = find_mtp(&backend, node, false)?;
-
-    if open.kernel_driver_active(iface.interface_number) {
-        println!("  a kernel driver holds the interface, and the probe detaches it");
-        let _ = open.detach_kernel_driver(iface.interface_number);
-    }
-
-    // Put the protocol state of the device back to the start. A program that
-    // stopped in the middle of a data phase leaves a device that answers no
-    // command, and this request repairs that state.
-    // The device reset request repairs a device that a stopped program left
-    // in a bad state. The request also breaks a device that works.
-    //
-    // A Cyrus CS 24 in PTP mode passed 4 runs of 5 without the request, and
-    // 1 run of 5 with it. A Samsung SM-S901U needed the request to answer at
-    // all. The request is therefore a repair, and not a step for each open.
-    //
-    // See docs/06-the-reset-that-breaks.md.
-    if std::env::var("BSDROID_PTP_RESET").is_ok() {
-        println!("    the host sends a device reset request");
-        if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
-            println!("    the device reset request failed: {e}");
-        }
-    }
-
-    let device = open
-        .into_mtp(&iface, BULK_BUFFER)
-        .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-
     println!();
     println!("--- Session 1 ---");
-    let (mut s, opened) = start_session(device, &iface, 1)?;
-    let o = opened.outcome;
+    let c = connect(node, false, true)?;
+    let mut s = c.session;
+
+    let o = c.opened.outcome;
     println!(
         "    {:<16} {:>6} ms   {:#06x} {}",
         "OpenSession",
@@ -330,7 +372,8 @@ fn probe(node: Option<Node>) -> Result<(), String> {
         ));
     }
 
-    let w = wait_for_storage(&mut s)?;
+    // `connect` asked for a storage, so the wait is present and not empty.
+    let w = c.wait.expect("connect waited for a storage");
     println!(
         "    GetStorageIDs    {:>6} ms   {} attempt(s)   {} storage(s)",
         w.elapsed.as_millis(),
@@ -341,11 +384,6 @@ fn probe(node: Option<Node>) -> Result<(), String> {
         println!("      the first attempt gave an empty list, and the host retried");
     }
 
-    if w.ids.is_empty() {
-        report_no_storage(&w);
-        let _ = s.close_session();
-        return Err("the device reports 0 storages".to_string());
-    }
     let storage_ids = w.ids.clone();
     println!("      storages: {storage_ids:?}");
 
@@ -415,14 +453,10 @@ fn reopen(node: Option<Node>, cycles: u32) -> Result<(), String> {
         // The whole cycle sits in a block, so every handle closes at the end
         // of the block. The close is the part under test.
         let outcome = (|| -> Result<u16, String> {
-            let (mut open, iface) = find_mtp(&backend, node, true)?;
-            if open.kernel_driver_active(iface.interface_number) {
-                let _ = open.detach_kernel_driver(iface.interface_number);
-            }
-            let device = open
-                .into_mtp(&iface, BULK_BUFFER)
-                .map_err(|e| format!("cannot open the endpoints: {e}"))?;
-            let (mut s, _) = start_session(device, &iface, 1)?;
+            // The cycle asks for no storage, because the wait for a storage
+            // would hide the cost of the open and the close, which is the
+            // part under test.
+            let mut s = connect(node, true, false)?.session;
             let ids = s
                 .operation("GetStorageIDs", op::GET_STORAGE_IDS, &[])
                 .map_err(|e| format!("{e}"))?;
@@ -484,40 +518,8 @@ fn reopen(node: Option<Node>, cycles: u32) -> Result<(), String> {
 /// The object count also separates file transfer mode from image mode. See
 /// `docs/02-device-states.md`.
 fn objects(node: Option<Node>) -> Result<(), String> {
-    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
-    let (mut open, iface) = find_mtp(&backend, node, false)?;
-    if open.kernel_driver_active(iface.interface_number) {
-        let _ = open.detach_kernel_driver(iface.interface_number);
-    }
-    // Put the protocol state of the device back to the start. A program that
-    // stopped in the middle of a data phase leaves a device that answers no
-    // command, and this request repairs that state.
-    // The device reset request repairs a device that a stopped program left
-    // in a bad state. The request also breaks a device that works.
-    //
-    // A Cyrus CS 24 in PTP mode passed 4 runs of 5 without the request, and
-    // 1 run of 5 with it. A Samsung SM-S901U needed the request to answer at
-    // all. The request is therefore a repair, and not a step for each open.
-    //
-    // See docs/06-the-reset-that-breaks.md.
-    if std::env::var("BSDROID_PTP_RESET").is_ok() {
-        println!("    the host sends a device reset request");
-        if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
-            println!("    the device reset request failed: {e}");
-        }
-    }
-
-    let device = open
-        .into_mtp(&iface, BULK_BUFFER)
-        .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let (mut s, _) = start_session(device, &iface, 1)?;
-    let w = wait_for_storage(&mut s)?;
-    if w.ids.is_empty() {
-        report_no_storage(&w);
-        let _ = s.close_session();
-        return Err("the device reports 0 storages".to_string());
-    }
-    let storage = w.ids[0];
+    let c = connect(node, false, true)?;
+    let (mut s, storage) = (c.session, c.storage);
     println!();
     println!("storage {storage:#010x}");
 
@@ -606,10 +608,10 @@ const BENCH_SEARCH: usize = 120;
 /// a file. The sizes are therefore not the same on two phones. The report
 /// gives the size of each file, so a reader can compare two reports.
 fn bench(node: Option<Node>) -> Result<(), String> {
-    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
-    let (mut open, iface) = find_mtp(&backend, node, false)?;
+    let c = connect(node, false, true)?;
+    let (mut s, storage) = (c.session, c.storage);
 
-    let speed = open.speed();
+    let speed = s.speed();
     println!();
     println!("--- The link ---");
     println!("    speed: {speed}");
@@ -631,7 +633,7 @@ fn bench(node: Option<Node>) -> Result<(), String> {
     // An earlier version compared the speed of other devices on the host. That
     // test gives a guess. This test gives an answer from the device.
     if speed == LinkSpeed::High {
-        match open.capabilities(TIMEOUT) {
+        match s.device_capabilities() {
             Ok(caps) if caps.supports_faster_than_high() => {
                 println!();
                 println!("    The device says it supports super speed, and the link");
@@ -659,39 +661,6 @@ fn bench(node: Option<Node>) -> Result<(), String> {
             }
         }
     }
-
-    if open.kernel_driver_active(iface.interface_number) {
-        let _ = open.detach_kernel_driver(iface.interface_number);
-    }
-    // Put the protocol state of the device back to the start. A program that
-    // stopped in the middle of a data phase leaves a device that answers no
-    // command, and this request repairs that state.
-    // The device reset request repairs a device that a stopped program left
-    // in a bad state. The request also breaks a device that works.
-    //
-    // A Cyrus CS 24 in PTP mode passed 4 runs of 5 without the request, and
-    // 1 run of 5 with it. A Samsung SM-S901U needed the request to answer at
-    // all. The request is therefore a repair, and not a step for each open.
-    //
-    // See docs/06-the-reset-that-breaks.md.
-    if std::env::var("BSDROID_PTP_RESET").is_ok() {
-        println!("    the host sends a device reset request");
-        if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
-            println!("    the device reset request failed: {e}");
-        }
-    }
-
-    let device = open
-        .into_mtp(&iface, BULK_BUFFER)
-        .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let (mut s, _) = start_session(device, &iface, 1)?;
-    let w = wait_for_storage(&mut s)?;
-    if w.ids.is_empty() {
-        report_no_storage(&w);
-        let _ = s.close_session();
-        return Err("the device reports 0 storages".to_string());
-    }
-    let storage = w.ids[0];
 
     // Find files across a range of sizes.
     println!();
@@ -886,15 +855,9 @@ fn human(bytes: usize) -> String {
 /// what a filesystem on top of the device can do, so a filesystem needs this
 /// answer before the design, and not after.
 fn caps(node: Option<Node>) -> Result<(), String> {
-    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
-    let (mut open, iface) = find_mtp(&backend, node, false)?;
-    if open.kernel_driver_active(iface.interface_number) {
-        let _ = open.detach_kernel_driver(iface.interface_number);
-    }
-    let device = open
-        .into_mtp(&iface, BULK_BUFFER)
-        .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let (mut s, _) = start_session(device, &iface, 1)?;
+    // A report of what the device can do needs no storage, so this command
+    // does not wait for the storage list to fill.
+    let mut s = connect(node, false, false)?.session;
 
     let out = s
         .operation("GetDeviceInfo", op::GET_DEVICE_INFO, &[])
@@ -1033,40 +996,8 @@ const SEARCH_LIMIT: usize = 60;
 /// The command writes the payload to the file as the payload arrives. The host
 /// does not hold the object in memory, so a large file needs no large memory.
 fn get(node: Option<Node>, handle: Option<u32>) -> Result<(), String> {
-    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
-    let (mut open, iface) = find_mtp(&backend, node, false)?;
-    if open.kernel_driver_active(iface.interface_number) {
-        let _ = open.detach_kernel_driver(iface.interface_number);
-    }
-    // Put the protocol state of the device back to the start. A program that
-    // stopped in the middle of a data phase leaves a device that answers no
-    // command, and this request repairs that state.
-    // The device reset request repairs a device that a stopped program left
-    // in a bad state. The request also breaks a device that works.
-    //
-    // A Cyrus CS 24 in PTP mode passed 4 runs of 5 without the request, and
-    // 1 run of 5 with it. A Samsung SM-S901U needed the request to answer at
-    // all. The request is therefore a repair, and not a step for each open.
-    //
-    // See docs/06-the-reset-that-breaks.md.
-    if std::env::var("BSDROID_PTP_RESET").is_ok() {
-        println!("    the host sends a device reset request");
-        if let Err(e) = open.ptp_device_reset(iface.interface_number, TIMEOUT) {
-            println!("    the device reset request failed: {e}");
-        }
-    }
-
-    let device = open
-        .into_mtp(&iface, BULK_BUFFER)
-        .map_err(|e| format!("cannot open the MTP endpoints: {e}"))?;
-    let (mut s, _) = start_session(device, &iface, 1)?;
-    let w = wait_for_storage(&mut s)?;
-    if w.ids.is_empty() {
-        report_no_storage(&w);
-        let _ = s.close_session();
-        return Err("the device reports 0 storages".to_string());
-    }
-    let storage = w.ids[0];
+    let c = connect(node, false, true)?;
+    let (mut s, storage) = (c.session, c.storage);
 
     // Choose the object.
     let (target, info) = match handle {
@@ -1351,15 +1282,9 @@ fn coldstart(node: Option<Node>) -> Result<(), String> {
         }
     }
 
-    let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
-    let (mut open, iface) = find_mtp(&backend, node, true)?;
-    if open.kernel_driver_active(iface.interface_number) {
-        let _ = open.detach_kernel_driver(iface.interface_number);
-    }
-    let device = open
-        .into_mtp(&iface, BULK_BUFFER)
-        .map_err(|e| format!("cannot open the endpoints: {e}"))?;
-    let (mut s, _) = start_session(device, &iface, 1)?;
+    // This command asks for no storage from `connect`, because an empty list
+    // after a reset is the answer the test reports, and not a fault.
+    let mut s = connect(node, true, false)?.session;
 
     let w = wait_for_storage(&mut s)?;
     let _ = s.close_session();

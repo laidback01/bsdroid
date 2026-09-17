@@ -335,6 +335,30 @@ fn usage() {
     println!("  umount <mount point>");
 }
 
+/// Runs a callback body with the shared state.
+///
+/// FUSE calls a C function pointer, so every callback opens the same way: take
+/// the lock, check that the mount still holds a session, and give an error
+/// number when it does not. An earlier version wrote those six lines at the
+/// top of twelve callbacks.
+///
+/// `absent` is the error number to give when the mount holds no session.
+fn with_fs<F>(absent: i32, body: F) -> i32
+where
+    F: FnOnce(&mut Fs) -> i32,
+{
+    let mut guard = match FS.lock() {
+        Ok(g) => g,
+        // A panic in an earlier callback poisons the lock. The mount is then
+        // in an unknown state, so every later call reports a fault.
+        Err(_) => return -libc::EIO,
+    };
+    match guard.0.as_mut() {
+        Some(fs) => body(fs),
+        None => -absent,
+    }
+}
+
 /// Finds the handle a path names, and reads a folder when the tree needs one.
 ///
 /// The loop has a count limit, so a path cannot hold the host.
@@ -368,53 +392,50 @@ unsafe extern "C" fn op_getattr(
     _fi: *mut sys::fuse_file_info,
 ) -> i32 {
     let path = path_of(path);
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return -libc_enoent(),
-    };
 
-    // A file a program is writing is not on the device yet.
-    if let Some(p) = fs.pending.get(&path) {
-        let size = p.size;
+    with_fs(libc::ENOENT, |fs| {
+        // A file a program is writing is not on the device yet.
+        if let Some(p) = fs.pending.get(&path) {
+            let size = p.size;
+            // SAFETY: FUSE gives a buffer for one stat.
+            unsafe {
+                core::ptr::write_bytes(st, 0, 1);
+                (*st).st_mode = MODE_FILE as sys::mode_t;
+                (*st).st_nlink = 1;
+                (*st).st_size = size as sys::off_t;
+                (*st).st_blksize = 65536;
+            }
+            return 0;
+        }
+
+        let handle = match resolve(fs, &path) {
+            Some(h) => h,
+            None => return -libc::ENOENT,
+        };
+
         // SAFETY: FUSE gives a buffer for one stat.
+        unsafe { core::ptr::write_bytes(st, 0, 1) };
+
+        let (mode, size, links) = if handle == ROOT {
+            (MODE_DIR, 0u64, 2)
+        } else {
+            match fs.tree.get(handle) {
+                Some(e) if e.is_dir => (MODE_DIR, 0, 2),
+                Some(e) => (MODE_FILE, e.size, 1),
+                None => return -libc::ENOENT,
+            }
+        };
+
+        // SAFETY: the pointer is valid, and the fields are plain numbers.
         unsafe {
-            core::ptr::write_bytes(st, 0, 1);
-            (*st).st_mode = 0o100_644 as sys::mode_t;
-            (*st).st_nlink = 1;
+            (*st).st_mode = mode as sys::mode_t;
+            (*st).st_nlink = links;
             (*st).st_size = size as sys::off_t;
+            (*st).st_blocks = size.div_ceil(512) as sys::blkcnt_t;
             (*st).st_blksize = 65536;
         }
-        return 0;
-    }
-
-    let handle = match resolve(fs, &path) {
-        Some(h) => h,
-        None => return -libc_enoent(),
-    };
-
-    // SAFETY: FUSE gives a buffer for one stat.
-    unsafe { core::ptr::write_bytes(st, 0, 1) };
-
-    let (mode, size, links) = if handle == ROOT {
-        (MODE_DIR, 0u64, 2)
-    } else {
-        match fs.tree.get(handle) {
-            Some(e) if e.is_dir => (MODE_DIR, 0, 2),
-            Some(e) => (MODE_FILE, e.size, 1),
-            None => return -libc_enoent(),
-        }
-    };
-
-    // SAFETY: the pointer is valid, and the fields are plain numbers.
-    unsafe {
-        (*st).st_mode = mode as sys::mode_t;
-        (*st).st_nlink = links;
-        (*st).st_size = size as sys::off_t;
-        (*st).st_blocks = size.div_ceil(512) as sys::blkcnt_t;
-        (*st).st_blksize = 65536;
-    }
-    0
+        0
+    })
 }
 
 /// Lists a folder.
@@ -427,78 +448,72 @@ unsafe extern "C" fn op_readdir(
     _flags: sys::fuse_readdir_flags,
 ) -> i32 {
     let path = path_of(path);
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return -libc_enoent(),
-    };
 
-    let handle = match resolve(fs, &path) {
-        Some(h) => h,
-        None => return -libc_enoent(),
-    };
-
-    // The tree holds the listing after `resolve`, and a folder the walk did
-    // not open still needs a read.
-    if !fs.tree.is_listed(handle) {
-        match fs.mtp.list(handle) {
-            Ok(entries) => fs.tree.set_children(handle, entries),
-            Err(_) => return -libc_eio(),
-        }
-    }
-
-    let fill = match filler {
-        Some(f) => f,
-        None => return -libc_eio(),
-    };
-
-    for name in [".", ".."] {
-        let c = CString::new(name).unwrap();
-        // SAFETY: the filler takes a C string and a null stat.
-        unsafe { fill(buf, c.as_ptr(), core::ptr::null(), 0, 0) };
-    }
-
-    let entries = match fs.tree.children(handle) {
-        Some(e) => e,
-        None => return -libc_eio(),
-    };
-
-    for e in entries {
-        // A name with a null or a separator cannot go in a folder.
-        let name = e.name.replace(['/', '\0'], "_");
-        let c = match CString::new(name) {
-            Ok(c) => c,
-            Err(_) => continue,
+    with_fs(libc::ENOENT, |fs| {
+        let handle = match resolve(fs, &path) {
+            Some(h) => h,
+            None => return -libc::ENOENT,
         };
-        // SAFETY: see above.
-        unsafe { fill(buf, c.as_ptr(), core::ptr::null(), 0, 0) };
-    }
-    0
+
+        // The tree holds the listing after `resolve`, and a folder the walk did
+        // not open still needs a read.
+        if !fs.tree.is_listed(handle) {
+            match fs.mtp.list(handle) {
+                Ok(entries) => fs.tree.set_children(handle, entries),
+                Err(_) => return -libc::EIO,
+            }
+        }
+
+        let fill = match filler {
+            Some(f) => f,
+            None => return -libc::EIO,
+        };
+
+        for name in [".", ".."] {
+            let c = CString::new(name).unwrap();
+            // SAFETY: the filler takes a C string and a null stat.
+            unsafe { fill(buf, c.as_ptr(), core::ptr::null(), 0, 0) };
+        }
+
+        let entries = match fs.tree.children(handle) {
+            Some(e) => e,
+            None => return -libc::EIO,
+        };
+
+        for e in entries {
+            // A name with a null or a separator cannot go in a folder.
+            let name = e.name.replace(['/', '\0'], "_");
+            let c = match CString::new(name) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            // SAFETY: see above.
+            unsafe { fill(buf, c.as_ptr(), core::ptr::null(), 0, 0) };
+        }
+        0
+    })
 }
 
 /// Opens a file for a read.
 unsafe extern "C" fn op_open(path: *const i8, fi: *mut sys::fuse_file_info) -> i32 {
     let path = path_of(path);
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return -libc_enoent(),
-    };
 
-    let handle = match resolve(fs, &path) {
-        Some(h) => h,
-        None => return -libc_enoent(),
-    };
-    match fs.tree.get(handle) {
-        Some(e) if !e.is_dir => {}
-        _ => return -libc_eisdir(),
-    }
+    with_fs(libc::ENOENT, |fs| {
+        let handle = match resolve(fs, &path) {
+            Some(h) => h,
+            None => return -libc::ENOENT,
+        };
+        match fs.tree.get(handle) {
+            Some(e) if !e.is_dir => {}
+            _ => return -libc::EISDIR,
+        }
 
-    // SAFETY: FUSE gives a valid structure.
-    if !fi.is_null() {
-        unsafe { (*fi).fh = u64::from(handle) };
-    }
-    0
+        // SAFETY: FUSE gives a valid structure.
+        if !fi.is_null() {
+            unsafe { (*fi).fh = u64::from(handle) };
+        }
+        0
+    })
 }
 
 /// Reports the size and the free space of the storage.
@@ -506,97 +521,90 @@ unsafe extern "C" fn op_open(path: *const i8, fi: *mut sys::fuse_file_info) -> i
 /// A program that copies a file asks for the free space first, and a fault
 /// here stops the copy. `df` also needs this answer.
 unsafe extern "C" fn op_statfs(_path: *const i8, st: *mut sys::statvfs) -> i32 {
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return -libc_eio(),
-    };
+    with_fs(libc::EIO, |fs| {
+        let (total, free) = match fs.mtp.storage_info() {
+            Ok(v) => v,
+            Err(_) => return -libc::EIO,
+        };
 
-    let (total, free) = match fs.mtp.storage_info() {
-        Ok(v) => v,
-        Err(_) => return -libc_eio(),
-    };
+        // A block of 4096 bytes gives a count that fits, for a storage of any
+        // size a cellphone holds.
+        let block = 4096u64;
 
-    // A block of 4096 bytes gives a count that fits, for a storage of any
-    // size a cellphone holds.
-    let block = 4096u64;
-
-    // SAFETY: FUSE gives a buffer for one statvfs.
-    unsafe {
-        core::ptr::write_bytes(st, 0, 1);
-        (*st).f_bsize = block as core::ffi::c_ulong;
-        (*st).f_frsize = block as core::ffi::c_ulong;
-        (*st).f_blocks = (total / block) as sys::fsblkcnt_t;
-        (*st).f_bfree = (free / block) as sys::fsblkcnt_t;
-        (*st).f_bavail = (free / block) as sys::fsblkcnt_t;
-        (*st).f_namemax = 255;
-    }
-    0
+        // SAFETY: FUSE gives a buffer for one statvfs.
+        unsafe {
+            core::ptr::write_bytes(st, 0, 1);
+            (*st).f_bsize = block as core::ffi::c_ulong;
+            (*st).f_frsize = block as core::ffi::c_ulong;
+            (*st).f_blocks = (total / block) as sys::fsblkcnt_t;
+            (*st).f_bfree = (free / block) as sys::fsblkcnt_t;
+            (*st).f_bavail = (free / block) as sys::fsblkcnt_t;
+            (*st).f_namemax = 255;
+        }
+        0
+    })
 }
 
 /// Gives an object a new name, and moves the object to another folder.
 unsafe extern "C" fn op_rename(from: *const i8, to: *const i8, _flags: u32) -> i32 {
     let from = path_of(from);
     let to = path_of(to);
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return -libc_eio(),
-    };
 
-    let handle = match resolve(fs, &from) {
-        Some(h) => h,
-        None => return -libc_enoent(),
-    };
-    if handle == ROOT {
-        return -libc_eio();
-    }
-
-    let (old_dir, _) = split_parent(&from);
-    let (new_dir, new_name) = split_parent(&to);
-    if new_name.is_empty() {
-        return -libc_eio();
-    }
-
-    let old_parent = match resolve(fs, &old_dir) {
-        Some(h) => h,
-        None => return -libc_enoent(),
-    };
-    let new_parent = match resolve(fs, &new_dir) {
-        Some(h) => h,
-        None => return -libc_enoent(),
-    };
-
-    // A move to another folder comes first, because a name in the new folder
-    // must not meet a name in the old one.
-    if new_parent != old_parent {
-        if !fs.mtp.can_move() {
-            return -libc_enotsup();
+    with_fs(libc::EIO, |fs| {
+        let handle = match resolve(fs, &from) {
+            Some(h) => h,
+            None => return -libc::ENOENT,
+        };
+        if handle == ROOT {
+            return -libc::EIO;
         }
-        if let Err(e) = fs.mtp.move_object(handle, new_parent) {
-            eprintln!("mtpfs: cannot move {from}: {e}");
-            return -libc_eio();
-        }
-    }
 
-    let old_name = fs
-        .tree
-        .get(handle)
-        .map(|e| e.name.clone())
-        .unwrap_or_default();
-    if old_name != new_name {
-        if !fs.mtp.can_rename() {
-            return -libc_enotsup();
+        let (old_dir, _) = split_parent(&from);
+        let (new_dir, new_name) = split_parent(&to);
+        if new_name.is_empty() {
+            return -libc::EIO;
         }
-        if let Err(e) = fs.mtp.rename_object(handle, &new_name) {
-            eprintln!("mtpfs: cannot rename {from}: {e}");
-            return -libc_eio();
-        }
-    }
 
-    fs.tree.forget_listing(old_parent);
-    fs.tree.forget_listing(new_parent);
-    0
+        let old_parent = match resolve(fs, &old_dir) {
+            Some(h) => h,
+            None => return -libc::ENOENT,
+        };
+        let new_parent = match resolve(fs, &new_dir) {
+            Some(h) => h,
+            None => return -libc::ENOENT,
+        };
+
+        // A move to another folder comes first, because a name in the new folder
+        // must not meet a name in the old one.
+        if new_parent != old_parent {
+            if !fs.mtp.can_move() {
+                return -libc::ENOTSUP;
+            }
+            if let Err(e) = fs.mtp.move_object(handle, new_parent) {
+                eprintln!("mtpfs: cannot move {from}: {e}");
+                return -libc::EIO;
+            }
+        }
+
+        let old_name = fs
+            .tree
+            .get(handle)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        if old_name != new_name {
+            if !fs.mtp.can_rename() {
+                return -libc::ENOTSUP;
+            }
+            if let Err(e) = fs.mtp.rename_object(handle, &new_name) {
+                eprintln!("mtpfs: cannot rename {from}: {e}");
+                return -libc::EIO;
+            }
+        }
+
+        fs.tree.forget_listing(old_parent);
+        fs.tree.forget_listing(new_parent);
+        0
+    })
 }
 
 /// Accepts a change of time, and changes nothing.
@@ -650,43 +658,40 @@ unsafe extern "C" fn op_create(
     fi: *mut sys::fuse_file_info,
 ) -> i32 {
     let path = path_of(path);
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return -libc_eio(),
-    };
 
-    let (dir, name) = split_parent(&path);
-    if name.is_empty() {
-        return -libc_eio();
-    }
-    let parent = match resolve(fs, &dir) {
-        Some(h) => h,
-        None => return -libc_enoent(),
-    };
-
-    let (file, spool) = match make_spool() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("mtpfs: cannot make a spool file in {:?}: {e}", spool_dir());
-            return -libc_eio();
+    with_fs(libc::EIO, |fs| {
+        let (dir, name) = split_parent(&path);
+        if name.is_empty() {
+            return -libc::EIO;
         }
-    };
+        let parent = match resolve(fs, &dir) {
+            Some(h) => h,
+            None => return -libc::ENOENT,
+        };
 
-    fs.pending.insert(
-        path,
-        Pending {
-            parent,
-            name,
-            file,
-            spool,
-            size: 0,
-        },
-    );
-    if !fi.is_null() {
-        unsafe { (*fi).fh = 0 };
-    }
-    0
+        let (file, spool) = match make_spool() {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("mtpfs: cannot make a spool file in {:?}: {e}", spool_dir());
+                return -libc::EIO;
+            }
+        };
+
+        fs.pending.insert(
+            path,
+            Pending {
+                parent,
+                name,
+                file,
+                spool,
+                size: 0,
+            },
+        );
+        if !fi.is_null() {
+            unsafe { (*fi).fh = 0 };
+        }
+        0
+    })
 }
 
 /// Keeps the bytes of a write.
@@ -698,79 +703,73 @@ unsafe extern "C" fn op_write(
     _fi: *mut sys::fuse_file_info,
 ) -> i32 {
     let path = path_of(path);
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return -libc_eio(),
-    };
 
-    let p = match fs.pending.get_mut(&path) {
-        Some(p) => p,
-        None => return -libc_erofs(),
-    };
+    with_fs(libc::EIO, |fs| {
+        let p = match fs.pending.get_mut(&path) {
+            Some(p) => p,
+            None => return -libc::EROFS,
+        };
 
-    // SAFETY: FUSE gives a buffer of `size` bytes.
-    let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, size) };
+        // SAFETY: FUSE gives a buffer of `size` bytes.
+        let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, size) };
 
-    use std::os::unix::fs::FileExt;
-    let mut done = 0;
-    while done < size {
-        match p.file.write_at(&bytes[done..], offset as u64 + done as u64) {
-            Ok(0) => break,
-            Ok(n) => done += n,
-            Err(e) => {
-                eprintln!("mtpfs: cannot write the spool file: {e}");
-                return -libc_eio();
+        use std::os::unix::fs::FileExt;
+        let mut done = 0;
+        while done < size {
+            match p.file.write_at(&bytes[done..], offset as u64 + done as u64) {
+                Ok(0) => break,
+                Ok(n) => done += n,
+                Err(e) => {
+                    eprintln!("mtpfs: cannot write the spool file: {e}");
+                    return -libc::EIO;
+                }
             }
         }
-    }
-    if done < size {
-        eprintln!("mtpfs: the spool file took {done} bytes of {size}");
-        return -libc_eio();
-    }
+        if done < size {
+            eprintln!("mtpfs: the spool file took {done} bytes of {size}");
+            return -libc::EIO;
+        }
 
-    let end = offset as u64 + size as u64;
-    if end > p.size {
-        p.size = end;
-    }
-    size as i32
+        let end = offset as u64 + size as u64;
+        if end > p.size {
+            p.size = end;
+        }
+        size as i32
+    })
 }
 
 /// Sends the file to the device when a program closes the file.
 unsafe extern "C" fn op_release(path: *const i8, _fi: *mut sys::fuse_file_info) -> i32 {
     let path = path_of(path);
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return 0,
-    };
 
-    let mut p = match fs.pending.remove(&path) {
-        Some(p) => p,
-        None => return 0,
-    };
+    with_fs(0, |fs| {
+        let mut p = match fs.pending.remove(&path) {
+            Some(p) => p,
+            None => return 0,
+        };
 
-    // The reader starts at the first byte. `Pending` removes the spool file.
-    use std::io::Seek;
-    if let Err(e) = p.file.seek(std::io::SeekFrom::Start(0)) {
-        eprintln!("mtpfs: cannot read the spool file: {e}");
-        return -libc_eio();
-    }
-
-    let size = p.size;
-    let parent = p.parent;
-    let name = p.name.clone();
-    match fs.mtp.send_object_stream(parent, &name, &mut p.file, size) {
-        Ok(_) => {
-            // The folder holds a new object, so the listing is old.
-            fs.tree.forget_listing(parent);
-            0
+        // The reader starts at the first byte. `Pending` removes the spool file.
+        use std::io::Seek;
+        if let Err(e) = p.file.seek(std::io::SeekFrom::Start(0)) {
+            eprintln!("mtpfs: cannot read the spool file: {e}");
+            return -libc::EIO;
         }
-        Err(e) => {
-            eprintln!("mtpfs: cannot write {path}: {e}");
-            -libc_eio()
+
+        let size = p.size;
+        let parent = p.parent;
+        let name = p.name.clone();
+        match fs.mtp.send_object_stream(parent, &name, &mut p.file, size) {
+            Ok(_) => {
+                // The folder holds a new object, so the listing is old.
+                fs.tree.forget_listing(parent);
+                0
+            }
+            Err(e) => {
+                eprintln!("mtpfs: cannot write {path}: {e}");
+                -libc::EIO
+            }
         }
-    }
+    })
 }
 
 /// Accepts a change of size for a file a program is writing.
@@ -780,23 +779,21 @@ unsafe extern "C" fn op_truncate(
     _fi: *mut sys::fuse_file_info,
 ) -> i32 {
     let path = path_of(path);
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return -libc_eio(),
-    };
-    match fs.pending.get_mut(&path) {
-        Some(p) => {
-            if let Err(e) = p.file.set_len(size as u64) {
-                eprintln!("mtpfs: cannot set the size of the spool file: {e}");
-                return -libc_eio();
+
+    with_fs(libc::EIO, |fs| {
+        match fs.pending.get_mut(&path) {
+            Some(p) => {
+                if let Err(e) = p.file.set_len(size as u64) {
+                    eprintln!("mtpfs: cannot set the size of the spool file: {e}");
+                    return -libc::EIO;
+                }
+                p.size = size as u64;
+                0
             }
-            p.size = size as u64;
-            0
+            // A file on the device does not change size in this version.
+            None => -libc::EROFS,
         }
-        // A file on the device does not change size in this version.
-        None => -libc_erofs(),
-    }
+    })
 }
 
 /// Removes a file.
@@ -812,72 +809,66 @@ unsafe extern "C" fn op_rmdir(path: *const i8) -> i32 {
 /// Removes an object, and checks the kind first.
 fn remove(path: *const i8, want_dir: bool) -> i32 {
     let path = path_of(path);
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return -libc_eio(),
-    };
 
-    let handle = match resolve(fs, &path) {
-        Some(h) => h,
-        None => return -libc_enoent(),
-    };
-    if handle == ROOT {
-        return -libc_eio();
-    }
-
-    let (is_dir, parent) = match fs.tree.get(handle) {
-        Some(e) => (e.is_dir, e.parent),
-        None => return -libc_enoent(),
-    };
-    if is_dir != want_dir {
-        return if want_dir {
-            -libc_enotdir()
-        } else {
-            -libc_eisdir()
+    with_fs(libc::EIO, |fs| {
+        let handle = match resolve(fs, &path) {
+            Some(h) => h,
+            None => return -libc::ENOENT,
         };
-    }
+        if handle == ROOT {
+            return -libc::EIO;
+        }
 
-    match fs.mtp.delete_object(handle) {
-        Ok(()) => {
-            fs.tree.forget_listing(parent);
-            0
+        let (is_dir, parent) = match fs.tree.get(handle) {
+            Some(e) => (e.is_dir, e.parent),
+            None => return -libc::ENOENT,
+        };
+        if is_dir != want_dir {
+            return if want_dir {
+                -libc::ENOTDIR
+            } else {
+                -libc::EISDIR
+            };
         }
-        Err(e) => {
-            eprintln!("mtpfs: cannot remove {path}: {e}");
-            -libc_eio()
+
+        match fs.mtp.delete_object(handle) {
+            Ok(()) => {
+                fs.tree.forget_listing(parent);
+                0
+            }
+            Err(e) => {
+                eprintln!("mtpfs: cannot remove {path}: {e}");
+                -libc::EIO
+            }
         }
-    }
+    })
 }
 
 /// Makes a folder.
 unsafe extern "C" fn op_mkdir(path: *const i8, _mode: sys::mode_t) -> i32 {
     let path = path_of(path);
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return -libc_eio(),
-    };
 
-    let (dir, name) = split_parent(&path);
-    if name.is_empty() {
-        return -libc_eio();
-    }
-    let parent = match resolve(fs, &dir) {
-        Some(h) => h,
-        None => return -libc_enoent(),
-    };
+    with_fs(libc::EIO, |fs| {
+        let (dir, name) = split_parent(&path);
+        if name.is_empty() {
+            return -libc::EIO;
+        }
+        let parent = match resolve(fs, &dir) {
+            Some(h) => h,
+            None => return -libc::ENOENT,
+        };
 
-    match fs.mtp.send_object(parent, &name, &[], true) {
-        Ok(_) => {
-            fs.tree.forget_listing(parent);
-            0
+        match fs.mtp.send_object(parent, &name, &[], true) {
+            Ok(_) => {
+                fs.tree.forget_listing(parent);
+                0
+            }
+            Err(e) => {
+                eprintln!("mtpfs: cannot make the folder {path}: {e}");
+                -libc::EIO
+            }
         }
-        Err(e) => {
-            eprintln!("mtpfs: cannot make the folder {path}: {e}");
-            -libc_eio()
-        }
-    }
+    })
 }
 
 /// Reads part of a file.
@@ -888,69 +879,67 @@ unsafe extern "C" fn op_read(
     offset: sys::off_t,
     fi: *mut sys::fuse_file_info,
 ) -> i32 {
-    let mut guard = FS.lock().unwrap();
-    let fs = match guard.0.as_mut() {
-        Some(f) => f,
-        None => return -libc_enoent(),
-    };
+    with_fs(libc::ENOENT, |fs| {
+        // The handle comes from `open`, and a path is the fallback.
+        let handle = if !fi.is_null() && (unsafe { (*fi).fh }) != 0 {
+            (unsafe { (*fi).fh }) as u32
+        } else {
+            let p = path_of(path);
+            match resolve(fs, &p) {
+                Some(h) => h,
+                None => return -libc::ENOENT,
+            }
+        };
 
-    // The handle comes from `open`, and a path is the fallback.
-    let handle = if !fi.is_null() && (unsafe { (*fi).fh }) != 0 {
-        (unsafe { (*fi).fh }) as u32
-    } else {
-        let p = path_of(path);
-        match resolve(fs, &p) {
-            Some(h) => h,
-            None => return -libc_enoent(),
+        let file_size = match fs.tree.get(handle) {
+            Some(e) => e.size,
+            None => return -libc::ENOENT,
+        };
+
+        let offset = offset as u64;
+        if offset >= file_size {
+            return 0;
         }
-    };
+        let want = core::cmp::min(size as u64, file_size - offset) as usize;
 
-    let file_size = match fs.tree.get(handle) {
-        Some(e) => e.size,
-        None => return -libc_enoent(),
-    };
+        // BSDROID_DEBUG reports the size FUSE asks for. The size sets the count of
+        // round trips a copy needs, and the count sets the rate.
+        if std::env::var("BSDROID_DEBUG").is_ok() {
+            eprintln!("read: offset {offset} size {size} want {want}");
+        }
 
-    let offset = offset as u64;
-    if offset >= file_size {
-        return 0;
-    }
-    let want = core::cmp::min(size as u64, file_size - offset) as usize;
+        let data = match fs.mtp.read_at(handle, offset, want, file_size) {
+            Ok(d) => d,
+            Err(_) => return -libc::EIO,
+        };
 
-    // BSDROID_DEBUG reports the size FUSE asks for. The size sets the count of
-    // round trips a copy needs, and the count sets the rate.
-    if std::env::var("BSDROID_DEBUG").is_ok() {
-        eprintln!("read: offset {offset} size {size} want {want}");
-    }
-
-    let data = match fs.mtp.read_at(handle, offset, want, file_size) {
-        Ok(d) => d,
-        Err(_) => return -libc_eio(),
-    };
-
-    let n = core::cmp::min(data.len(), size);
-    // SAFETY: FUSE gives a buffer of `size` bytes, and `n` is not larger.
-    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, n) };
-    n as i32
+        let n = core::cmp::min(data.len(), size);
+        // SAFETY: FUSE gives a buffer of `size` bytes, and `n` is not larger.
+        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, n) };
+        n as i32
+    })
 }
 
-// The error numbers the callbacks give. FreeBSD sets these values.
-fn libc_enoent() -> i32 {
-    2
-}
-fn libc_eio() -> i32 {
-    5
-}
-fn libc_eisdir() -> i32 {
-    21
-}
-fn libc_erofs() -> i32 {
-    30
-}
-fn libc_enotdir() -> i32 {
-    20
-}
-fn libc_enotsup() -> i32 {
-    45
+/// The error numbers the callbacks give.
+///
+/// FreeBSD sets these values. An earlier version held six functions that each
+/// returned a literal, and every call site read `-libc::ENOENT`.
+///
+/// The module carries the name `libc` so a reader recognises the values, and
+/// the project still links no `libc` crate.
+mod libc {
+    /// No such file or folder.
+    pub const ENOENT: i32 = 2;
+    /// An input or output fault.
+    pub const EIO: i32 = 5;
+    /// The name is a folder, and the caller wanted a file.
+    pub const EISDIR: i32 = 21;
+    /// The name is a file, and the caller wanted a folder.
+    pub const ENOTDIR: i32 = 20;
+    /// The filesystem is read only.
+    pub const EROFS: i32 = 30;
+    /// The device cannot do this operation.
+    pub const ENOTSUP: i32 = 45;
 }
 
 #[cfg(test)]

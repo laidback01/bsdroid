@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/hex-fixture",
     "crates/ptp-proto",
     "crates/usb-freebsd",
     "crates/mtp-session",

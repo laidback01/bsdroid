@@ -408,6 +408,22 @@ impl Session {
         self.config
     }
 
+    /// The speed of the USB link to the device.
+    pub fn speed(&self) -> usb_freebsd::device::LinkSpeed {
+        self.device.speed()
+    }
+
+    /// Reads what the device says it can do, from the BOS descriptor.
+    ///
+    /// A device that runs at high speed and reports super speed has a cable or
+    /// a port that cannot do more. The answer does not change with the link.
+    pub fn device_capabilities(
+        &mut self,
+    ) -> Result<usb_freebsd::descriptor::DeviceCapabilities, UsbError> {
+        let timeout = self.config.timeout;
+        self.device.capabilities(timeout)
+    }
+
     /// Resets the device on the USB port.
     ///
     /// A caller uses this after it closes the session. The device starts

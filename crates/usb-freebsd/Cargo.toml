@@ -11,3 +11,6 @@ repository.workspace = true
 # The crate has no Rust dependency. The crate links libusb20, which FreeBSD
 # ships in the base system.
 [dependencies]
+
+[dev-dependencies]
+hex-fixture = { path = "../hex-fixture" }
