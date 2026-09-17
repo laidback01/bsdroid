@@ -4,9 +4,13 @@ Mount an Android cellphone as a folder, on FreeBSD.
 
 ## Why this exists
 
-A FreeBSD desktop does not get on well with a modern Android cellphone. You
-connect the cellphone, you try to mount it, and the mount stops. The mount
-point then gives an error for each command, and one CPU core runs at 100%.
+My phone, a Samsung Galaxy S22, didn't work well with the existing tools on FreeBSD 15.1. 
+I really don't want to use a specialized application for my phone, the phone should just
+be another mounted filesystem. I should be able to browse the phone with whatever 
+filemanager is in my window manager at the time.  I do rotate between Gnome, KDE, XFCE, etc
+as time allows. Having fusefs mount my phone seems like such a simple solution. None of
+the exisiting solutions worked for me. Mount point would give me some odd usb error,
+and one of my cores would max out at 100%. 
 
 I've used jmtpfs, simple-mtpfs, and tried aft-mtp-mount. On the day this
 project started, `simple-mtpfs` left a mount point in this state:
@@ -74,24 +78,25 @@ built this, with an extra thing enabled on the phone.
 **Immich, Syncthing, PhotoSync, KDEConnect, photoprism.** These are continuous
 sync. They are good at that, and if you want your photos to arrive on a server
 by themselves, use one of them. They need a server, or an account, or the
-network. I wanted to plug a cable in and look at a folder. It also works for a
-phone that is not mine, with nothing installed on it.
+network. I wanted to plug a cable in and look at a folder. I don't always have 
+a network on a phone. Literally have a phone without a sim and the wifi is bad. 
+But it's camera is really nice, and it's convenient. So I still want to get 
+data off of it.
 
-**Copy to a USB drive first.** Honest answer, and it does avoid the problem.
+**Copy to a USB drive first.** Yeah, cool. Pain in the butt for me though. Seems
+like this is a suggestion that covers most of my needs, but then I need a file
+browser app on my phone. Huh... I've got cables galore. Going to use them.
 
-So this is for one job: connect a cellphone, and browse it in the file manager
-you already run. No daemon, no server, no account, no network, nothing
-installed on the phone, and nothing enabled beyond file transfer mode in the
-notification shade. FUSE is how you get that on FreeBSD, and it means the
-result works the same under Nautilus, Dolphin or Thunar.
+This software is one job: connect a cellphone, and browse it in the file manager
+you already run. Nothing special on the phone, no dev options, just turn on 
+file sharing when it's connected via the cable. FUSE is how you get that on FreeBSD, 
+and it works the same under Nautilus, Dolphin or Thunar. For me, this is great!
 
 ### "MTP is slow and fragile"
 
-I hear this a lot. The measurements here do not agree.
-
-Slow: a read of a 39 MB file reached 42.7 MiB each second, which is the
-practical limit of a USB 2.0 high speed link. The link is the limit, not the
-protocol. See `docs/04-file-transfer.md`.
+Slow: I don't have the right cable it seems, and can't get beyond 42.7 MiB/s, 
+but that's pretty good on High Speed. The link is the limit, not the protocol. 
+See `docs/04-file-transfer.md`.
 
 Fragile: that reputation is earned, but not by MTP. Two things earn it. The
 first is the compatibility layer above, which cannot set a deadline. The
@@ -113,11 +118,13 @@ which I have not found written down anywhere else:
 Handle those and MTP is neither slow nor fragile. Miss one and it looks like
 both. The files in `docs/` hold the measurement for each.
 
-A person pulled the cable, changed the USB mode, and moved the cellphones
-between ports while this ran, on three cellphones at once, including a cable
-with a bad contact. 583 writes of 24 MiB went out and came back with the same
-bytes, no command failed to return, and nothing was lost in silence. See
-`docs/10-what-works.md`.
+I did some chaos testing with 3 phones, three connected writes, pulling cables,
+resetting, rotating ports, iterating the usb mode, etc. I've got a known bad cable
+I used as well. Took a bit, but we have a system that found most of the 
+issues that crop up under that load, and have modest solution here.
+583 writes of 24 MiB went out and came back with the same bytes, no command
+failed to return, and nothing was lost in silence. 
+See `docs/10-what-works.md`.
 
 ### Does this use libmtp?
 
@@ -127,7 +134,7 @@ The project read the device fault database of `libmtp` as reference material,
 and `docs/08-what-libmtp-knows.md` compares the two. The project links no part
 of `libmtp`, and calls no function of it.
 
-One thing here confuses a reader, so check it yourself:
+Linker shows we are using that shim, but it's not accurate:
 
 ```
 ldd target/release/mtpfs
@@ -188,7 +195,10 @@ thing you can send. See `docs/08-what-libmtp-knows.md`.
 | Rename a file          | yes   |
 | Move a file            | yes   |
 | Report the free space  | yes   |
-| Change a file in place | no    |
+| Overwrite a file       | yes   |
+| Append to a file       | yes   |
+| Truncate a file        | yes   |
+| Change a file in place | yes   |
 
 A read gives the same bytes as a copy over `adb`. A test compares a SHA-256
 sum, for a file of 290 KB and for a file of 450 MB.
@@ -201,28 +211,34 @@ for the spool file; the default is `/var/tmp`.
 accepts each request and changes nothing. A fault there stops a copy, and a
 copy is the job.
 
-### You cannot overwrite a file that is already there
+### Changing a file that is already on the phone
 
-Copy onto an existing file and you get this:
+This works. `cp` onto an existing file, `>>`, `truncate`, and `sed -i` all do
+what you expect, and a file manager's "Replace" prompt does too.
 
-```
-cp: /mnt/phone/Download/holiday.jpg: Read-only file system
-```
+MTP has no operation that writes into the middle of an object, and no operation
+that renames one object onto the name of another, so a change becomes a new
+object. The steps follow copy-on-write: read the file into a spool file on your
+disk, let the program change it, move the old object aside, send the new
+contents under the real name, then delete the old object. The old contents
+always survive until the new contents hold the real name.
 
-The mount is not read-only. That is the error code for "this version cannot
-change a file that is already on the phone". Delete it first, then copy:
+ZFS makes the last two steps one atomic step. MTP gives no atomic step, so the
+promise here is smaller: nothing is destroyed before the replacement is in
+place, but a mount that dies mid-swap can leave the new file plus an
+`.bsdroid-old-N` beside it. You see both, and you lose nothing.
 
-```
-rm /mnt/phone/Download/holiday.jpg
-cp holiday.jpg /mnt/phone/Download/
-```
+Two costs are worth knowing before you edit a large file:
 
-A file manager may show this as a failed or refused copy when you answer
-"Replace" to its overwrite prompt.
+- Your disk needs room for the whole file, because the spool file holds it.
+  Changing one byte of a 4 GB file reads 4 GB and writes 4 GB.
+- The phone needs room for two copies while the swap happens. If it cannot
+  hold two, the old object is deleted first and the spool file is the only
+  copy until the send finishes. The log says when it takes that route, and if
+  that send fails it keeps the spool file and prints its path.
 
-Writing a new file is fine. It is only the replace case that fails. MTP has
-operations for editing a file in place and both test phones support them, so
-this is a gap in the program rather than a limit of the protocol.
+If neither route fits, you get `ENOSPC` and nothing is touched. Set
+`BSDROID_SPOOL` to put the spool file somewhere with more room.
 
 `docs/10-what-works.md` holds the full list, with each limit and the reason.
 
@@ -440,6 +456,18 @@ four outcomes:
 | a command never returns                      | the fault this project avoids   |
 | a write holds wrong bytes                    | worse than a fault              |
 | a write reports success after a reported one | the program was told a lie      |
+
+### Does changing a file in place work?
+
+```
+doas sh tools/check-in-place-edit.sh ./target/debug/mtpfs 04e8:6860 phone /tmp/out
+```
+
+Runs 19 checks: overwrite, truncate, append, `sed -i`, the temp-file-and-rename
+dance an editor does, and a plain rename. Each one checks the contents
+afterwards, not just the exit status, and it fails if the folder is left with
+anything unexpected in it. The code before this feature scored 4 of 19; all
+three test phones now score 19 of 19.
 
 Run `mtpfs -l` for the vendor and the product of a cellphone.
 

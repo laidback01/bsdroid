@@ -204,3 +204,53 @@ answer. A later run gives the same answer and sends nothing.
 A program can close a file with no flush. `release` still sends an object that
 `flush` never sent, for that case. That send cannot report a fault. This is the
 whole reason the work moved.
+
+## A close must know which handle it closes
+
+`flush` and `release` both run for each close. An earlier version looked at the
+path alone, and a path can be open more than one time.
+
+`cp` onto a file that is already there shows the fault. The trace of the three
+test cellphones holds this order:
+
+```
+open /bsdroid-edit/a.txt flags=0x1   the writer
+truncate /bsdroid-edit/a.txt size=0  the writer empties the file
+open /bsdroid-edit/a.txt flags=0x0   a reader of the same path
+write /bsdroid-edit/a.txt            no spool file, so EROFS
+```
+
+The close of the reader reached `flush`, which sent a file the writer had not
+finished. `release` then removed the spool file. The next write found no spool
+file and answered EROFS, and the cellphone held an empty file.
+
+`fuse_file_info.fh` holds 64 bits, and an object handle holds 32 bits. The host
+therefore marks a handle that writes with bit 32, and `flush` and `release` act
+for a marked handle alone. The mark comes from the flags of that one `open`
+call. The mark does not come from the state of the path. A reader of a path
+that a writer holds open must stay unmarked.
+
+The probe in `tools/` measures 19 checks. The code before this change passed 4
+and failed 17. The code after it passes 19 on all three test cellphones.
+
+## A write that failed must not become a send
+
+`flush` sends the spool file. An earlier version sent the spool file whatever
+happened before, and a write that failed still reached `flush`.
+
+The measurement used a memory disk of 1.6 MB as the spool folder, and a file of
+5 MB:
+
+| Version | What `cp` said            | What the cellphone held |
+| ------- | ------------------------- | ----------------------- |
+| before  | Input/output error        | 1638400 bytes           |
+| after   | No space left on device   | no object               |
+
+`Pending` now holds the number of the fault. `send_pending` sees that number,
+and stops. The number also goes back to the caller in place of EIO. A program
+that sees ENOSPC can tell a person what to do.
+
+A test with a file of zero bytes does not measure this. FreeBSD `cp` looks for
+blocks of zeros, writes none of them, and calls `ftruncate` for the size. The
+spool file is then a sparse file of 50 MB on a disk of 1.6 MB, and every check
+passes for the wrong reason. Use `dd if=/dev/random` for a test of this kind.

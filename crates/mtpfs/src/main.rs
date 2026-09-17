@@ -51,6 +51,26 @@ struct Pending {
     /// sends the object and keeps the answer here. A later run reads it, and
     /// does not send the object a second time.
     sent: Option<i32>,
+    /// The object this write replaces, when the file was already there.
+    ///
+    /// A new file holds `None`. A file a program opened for writing holds the
+    /// handle of the object that was on the cellphone, and the send removes
+    /// that object once the new contents arrive.
+    replaces: Option<u32>,
+    /// The fault a write to the spool file gave, if a write gave one.
+    ///
+    /// A spool file that took only part of the bytes holds the wrong contents.
+    /// The send must not happen, because a part of a file under the right name
+    /// is worse than no file. An earlier version sent the part, and a disk
+    /// that filled left a short file on the cellphone.
+    broken: Option<i32>,
+    /// Whether the spool file stays on the disk after this entry goes.
+    ///
+    /// A failed send normally removes the spool file, because the cellphone
+    /// still holds the file the caller opened. A send that had to remove the
+    /// old object first has no such copy, so the spool file becomes the only
+    /// copy and it stays. See `send_pending`.
+    keep_spool: bool,
 }
 
 impl Drop for Pending {
@@ -60,6 +80,9 @@ impl Drop for Pending {
     /// that stops the mount in the middle of a write also removes the file,
     /// because `Fs` holds each `Pending`.
     fn drop(&mut self) {
+        if self.keep_spool {
+            return;
+        }
         let _ = std::fs::remove_file(&self.spool);
     }
 }
@@ -77,6 +100,29 @@ fn spool_dir() -> std::path::PathBuf {
         return std::path::PathBuf::from(d);
     }
     std::path::PathBuf::from("/var/tmp")
+}
+
+// `statvfs` reports the free space of the disk that holds the spool folder.
+// The struct comes from the headers of the host, through bindgen, so the
+// layout is the layout of this version of FreeBSD.
+extern "C" {
+    fn statvfs(path: *const i8, buf: *mut sys::statvfs) -> i32;
+}
+
+/// Gives the count of free bytes in a folder, for a user who is not root.
+///
+/// The answer is `None` when the call fails. A caller then goes on, because a
+/// missing number is not a reason to refuse the work.
+fn free_bytes(dir: &std::path::Path) -> Option<u64> {
+    let c = CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
+    // SAFETY: the pointer comes from a CString that lives to the end of the
+    // call, and the buffer is one zeroed struct of the right kind.
+    let mut buf: sys::statvfs = unsafe { core::mem::zeroed() };
+    let rc = unsafe { statvfs(c.as_ptr(), &mut buf) };
+    if rc != 0 {
+        return None;
+    }
+    Some(buf.f_bavail * buf.f_frsize)
 }
 
 /// The count of spool files this program made.
@@ -113,10 +159,65 @@ unsafe impl Send for FsCell {}
 
 static FS: Mutex<FsCell> = Mutex::new(FsCell(None));
 
+/// The flags of an `open` call that this program reads.
+///
+/// FreeBSD sets these values. The project links no `libc`, and `fuse_file_info`
+/// gives the flags as a plain `i32`.
+mod oflag {
+    /// The low two bits hold the access mode.
+    pub const ACCMODE: i32 = 0x0003;
+    /// The caller writes and does not read.
+    pub const WRONLY: i32 = 0x0001;
+    /// The caller reads and writes.
+    pub const RDWR: i32 = 0x0002;
+    /// The caller wants the file empty.
+    pub const TRUNC: i32 = 0x0400;
+
+    /// Says whether the caller asked to write.
+    pub fn writes(flags: i32) -> bool {
+        matches!(flags & ACCMODE, WRONLY | RDWR)
+    }
+}
+
+/// The bit in `fuse_file_info.fh` that marks a handle a caller can write.
+///
+/// # Why the mark is needed
+///
+/// `flush` and `release` run for each close, and a path can be open more than
+/// one time. `cp` onto a file that is already there opens the file to write
+/// it, and something opens the same file to read it. The close of the reader
+/// reached `flush`, which sent a file the writer had not finished, and then
+/// `release` removed the spool file. The next write found no spool and
+/// answered EROFS.
+///
+/// A handle for a write carries this bit, and a handle for a read does not.
+/// `flush` and `release` now act for the writer alone. An object handle is 32
+/// bits wide, and `fh` is 64 bits wide, so the bit is free.
+const FH_WRITER: u64 = 1 << 32;
+
+/// Takes the object handle out of a `fh` value.
+fn fh_handle(fh: u64) -> u32 {
+    (fh & 0xffff_ffff) as u32
+}
+
+/// Says whether a `fh` value belongs to a caller that writes.
+///
+/// A null `fuse_file_info` means the kernel gave no handle. The path then
+/// decides, as it did before this bit was there.
+unsafe fn fh_writes(fi: *const sys::fuse_file_info) -> bool {
+    if fi.is_null() {
+        return true;
+    }
+    unsafe { (*fi).fh & FH_WRITER != 0 }
+}
+
 /// The mode bits for a folder that a user can read and enter.
 const MODE_DIR: u32 = 0o040_755;
 /// The mode bits for a file that a user can read.
 const MODE_FILE: u32 = 0o100_644;
+
+/// The count of bytes the host reads at a time when it fills a spool file.
+const READ_CHUNK: usize = 1024 * 1024;
 
 /// The largest count of listings one path walk reads.
 ///
@@ -507,23 +608,146 @@ unsafe extern "C" fn op_readdir(
 /// Opens a file for a read.
 unsafe extern "C" fn op_open(path: *const i8, fi: *mut sys::fuse_file_info) -> i32 {
     let path = path_of(path);
+    // SAFETY: FUSE gives a valid structure, and `flags` is a plain number.
+    let flags = if fi.is_null() {
+        0
+    } else {
+        unsafe { (*fi).flags }
+    };
 
     with_fs(libc::ENOENT, |fs| {
         let handle = match resolve(fs, &path) {
             Some(h) => h,
             None => return -libc::ENOENT,
         };
-        match fs.tree.get(handle) {
-            Some(e) if !e.is_dir => {}
+        let entry = match fs.tree.get(handle) {
+            Some(e) if !e.is_dir => e.clone(),
             _ => return -libc::EISDIR,
+        };
+
+        // A caller that opens a file to write it needs a spool file. An
+        // earlier version made one only in `create`, which FUSE calls for a
+        // name the folder does not hold. A caller that opened a file that was
+        // already there therefore reached `write` with no spool, and the mount
+        // answered EROFS. `cp` onto an existing file failed that way, and so
+        // did every text editor.
+        if oflag::writes(flags) && !fs.pending.contains_key(&path) {
+            // O_TRUNC says the caller wants the file empty, so the old bytes
+            // need no read. Any other write opens the file as it is, because
+            // the caller can write one byte in the middle and keep the rest.
+            let keep = flags & oflag::TRUNC == 0;
+            if let Err(rc) = adopt_for_write(fs, &path, handle, &entry, keep) {
+                return rc;
+            }
         }
 
+        // The mark says what this handle does, and not what another handle
+        // does. A handle that reads a file a writer holds open must stay
+        // unmarked, or its close sends the file too early.
+        let mark = if oflag::writes(flags) { FH_WRITER } else { 0 };
         // SAFETY: FUSE gives a valid structure.
         if !fi.is_null() {
-            unsafe { (*fi).fh = u64::from(handle) };
+            unsafe { (*fi).fh = u64::from(handle) | mark };
         }
         0
     })
+}
+
+/// Makes a spool file for an object that is already on the cellphone.
+///
+/// `keep` says whether the old bytes go into the spool file. A caller that
+/// asked for an empty file needs none of them, and the read costs the whole
+/// size of the file.
+fn adopt_for_write(
+    fs: &mut Fs,
+    path: &str,
+    handle: u32,
+    entry: &mtpfs::tree::Entry,
+    keep: bool,
+) -> Result<(), i32> {
+    // A change to a file needs the whole file on the disk of the host. A
+    // refusal now is better than a fault after a read of some gigabytes.
+    let dir = spool_dir();
+    if keep && entry.size > 0 {
+        if let Some(free) = free_bytes(&dir) {
+            if entry.size > free {
+                eprintln!(
+                    "mtpfs: a change to {path} needs {} MB in {:?}, and {} MB is free. \
+                     Set BSDROID_SPOOL to a folder with more space.",
+                    entry.size / 1_000_000,
+                    dir,
+                    free / 1_000_000
+                );
+                return Err(-libc::ENOSPC);
+            }
+        }
+    }
+
+    let (mut file, spool) = match make_spool() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("mtpfs: cannot make a spool file in {:?}: {e}", spool_dir());
+            return Err(-libc::EIO);
+        }
+    };
+
+    let mut size = 0u64;
+    if keep && entry.size > 0 {
+        size = copy_object_to_spool(fs, handle, entry.size, &mut file)?;
+    }
+
+    fs.pending.insert(
+        path.to_string(),
+        Pending {
+            parent: entry.parent,
+            name: entry.name.clone(),
+            file,
+            spool,
+            size,
+            sent: None,
+            replaces: Some(handle),
+            broken: None,
+            keep_spool: false,
+        },
+    );
+    Ok(())
+}
+
+/// Reads a whole object from the cellphone into a spool file.
+///
+/// A caller that opens a file to change part of it needs the other parts. The
+/// host holds them on disk, and not in memory, so a change to one byte of a
+/// file of 4 GB costs 4 GB of disk and not 4 GB of memory.
+fn copy_object_to_spool(
+    fs: &mut Fs,
+    handle: u32,
+    size: u64,
+    file: &mut std::fs::File,
+) -> Result<u64, i32> {
+    use std::io::Write;
+
+    let mut at = 0u64;
+    // The loop asks for a count that the device gives, so the bound comes from
+    // the size and not from the device. See rule 1 in `docs/00-why.md`.
+    while at < size {
+        let want = core::cmp::min(READ_CHUNK as u64, size - at) as usize;
+        let data = match fs.mtp.read_at(handle, at, want, size) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("mtpfs: cannot read the file to change it: {e}");
+                return Err(-libc::EIO);
+            }
+        };
+        if data.is_empty() {
+            break;
+        }
+        if let Err(e) = file.write_all(&data) {
+            eprintln!("mtpfs: cannot fill the spool file: {e}");
+            return Err(-libc::EIO);
+        }
+        at += data.len() as u64;
+    }
+    Ok(at)
 }
 
 /// Reports the size and the free space of the storage.
@@ -584,6 +808,35 @@ unsafe extern "C" fn op_rename(from: *const i8, to: *const i8, _flags: u32) -> i
             None => return -libc::ENOENT,
         };
 
+        // A name that another object already holds must come free first.
+        //
+        // A cellphone refuses to rename an object onto a name that is taken.
+        // Measured on a Samsung SM-S901U: SetObjectPropValue answered 0x2002,
+        // which is a general fault, and the mount gave EIO.
+        //
+        // This is the step a text editor needs. An editor writes the new
+        // contents to a file beside the old one, and then renames the new file
+        // over the old one. That rename is this call.
+        //
+        // The old object moves aside, and it goes away only after the new name
+        // is in place. A delete of the old object first would destroy the only
+        // copy of the old contents before the host knows the rename works.
+        let moved_aside = match resolve(fs, &to) {
+            // The caller renamed a file onto itself.
+            Some(taken) if taken == handle => return 0,
+            Some(ROOT) => return -libc::EIO,
+            Some(taken) => {
+                let aside = aside_name(&new_name);
+                if let Err(e) = fs.mtp.rename_object(taken, &aside) {
+                    eprintln!("mtpfs: cannot move {to} aside: {e}");
+                    return -libc::EIO;
+                }
+                fs.tree.forget_listing(new_parent);
+                Some(taken)
+            }
+            None => None,
+        };
+
         // A move to another folder comes first, because a name in the new folder
         // must not meet a name in the old one.
         if new_parent != old_parent {
@@ -607,7 +860,27 @@ unsafe extern "C" fn op_rename(from: *const i8, to: *const i8, _flags: u32) -> i
             }
             if let Err(e) = fs.mtp.rename_object(handle, &new_name) {
                 eprintln!("mtpfs: cannot rename {from}: {e}");
+                // The old object moved aside for a rename that did not
+                // happen. Put it back, so the folder looks as it did.
+                if let Some(old) = moved_aside {
+                    if let Err(e2) = fs.mtp.rename_object(old, &new_name) {
+                        eprintln!(
+                            "mtpfs: {to} is now under a name that ends with \
+                             .bsdroid-old, and the host cannot put it back: {e2}"
+                        );
+                    }
+                }
+                fs.tree.forget_listing(new_parent);
                 return -libc::EIO;
+            }
+        }
+
+        // The new name is in place, so the old object can go.
+        if let Some(old) = moved_aside {
+            if let Err(e) = fs.mtp.delete_object(old) {
+                // The caller got what it asked for. A leftover object is
+                // untidy and not a fault of the write.
+                eprintln!("mtpfs: {to} is in place, and the old copy remains: {e}");
             }
         }
 
@@ -650,6 +923,31 @@ unsafe extern "C" fn op_chown(
     _fi: *mut sys::fuse_file_info,
 ) -> i32 {
     0
+}
+
+/// Builds a name for an object that moves aside.
+///
+/// # Why an object moves aside
+///
+/// MTP has no operation that renames one object onto the name of another. A
+/// cellphone refuses that rename, so a replace needs more than one step.
+///
+/// This code follows the shape of copy on write. ZFS writes new blocks and
+/// then moves one pointer, so the old data stays whole until the new data is
+/// ready. Here the old object moves to another name, the new contents take
+/// the real name, and the old object goes away last.
+///
+/// MTP gives no atomic step, so the guarantee is smaller than the one ZFS
+/// gives:
+///
+/// - The host never removes the old contents before the new contents hold the
+///   real name.
+/// - A mount that stops in the middle can leave two objects: the new one under
+///   the real name, and the old one under this name. A person sees both, and
+///   loses nothing.
+fn aside_name(name: &str) -> String {
+    let n = SPOOL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{name}.bsdroid-old-{n}")
 }
 
 /// Splits a path into the folder and the name.
@@ -696,10 +994,13 @@ unsafe extern "C" fn op_create(
                 spool,
                 size: 0,
                 sent: None,
+                replaces: None,
+                broken: None,
+                keep_spool: false,
             },
         );
         if !fi.is_null() {
-            unsafe { (*fi).fh = 0 };
+            unsafe { (*fi).fh = FH_WRITER };
         }
         0
     })
@@ -731,14 +1032,20 @@ unsafe extern "C" fn op_write(
                 Ok(0) => break,
                 Ok(n) => done += n,
                 Err(e) => {
+                    // The number from the host says what went wrong. A full
+                    // disk gives ENOSPC, and a program that sees ENOSPC can
+                    // tell a person what to do. EIO says nothing.
+                    let rc = e.raw_os_error().unwrap_or(libc::EIO);
                     eprintln!("mtpfs: cannot write the spool file: {e}");
-                    return -libc::EIO;
+                    p.broken = Some(rc);
+                    return -rc;
                 }
             }
         }
         if done < size {
             eprintln!("mtpfs: the spool file took {done} bytes of {size}");
-            return -libc::EIO;
+            p.broken = Some(libc::ENOSPC);
+            return -libc::ENOSPC;
         }
 
         let end = offset as u64 + size as u64;
@@ -753,6 +1060,16 @@ unsafe extern "C" fn op_write(
 ///
 /// The answer is the error number a callback gives back, and 0 for success.
 fn send_pending(fs: &mut Fs, p: &mut Pending, path: &str) -> i32 {
+    // A spool file that took only part of the bytes must not go to the
+    // cellphone. The file the caller opened stays as it was, and the caller
+    // already has the fault from the write that failed.
+    if let Some(rc) = p.broken {
+        eprintln!(
+            "mtpfs: {path} does not go to the cellphone, because a write to the spool file failed"
+        );
+        return -rc;
+    }
+
     // The reader starts at the first byte. `Pending` removes the spool file.
     use std::io::Seek;
     if let Err(e) = p.file.seek(std::io::SeekFrom::Start(0)) {
@@ -763,14 +1080,91 @@ fn send_pending(fs: &mut Fs, p: &mut Pending, path: &str) -> i32 {
     let size = p.size;
     let parent = p.parent;
     let name = p.name.clone();
+
+    // A write onto a file that was already there follows the shape of copy on
+    // write. See the comment on `aside_name`. The old object moves to another
+    // name first, so the cellphone holds the old contents until the new
+    // contents arrive under the real name.
+    // `false` means the old object went away before the send, so the spool
+    // file is the only copy of the contents.
+    let mut old_copy_exists = true;
+    if let Some(old) = p.replaces {
+        let old_size = fs.tree.get(old).map(|e| e.size).unwrap_or(0);
+        // An unknown free space means the cellphone gave no answer. The code
+        // then tries the safe way, and the cellphone refuses if it must.
+        let free = fs.mtp.storage_info().map(|(_, f)| f).unwrap_or(u64::MAX);
+
+        if free >= size {
+            // The cellphone holds the old object and the new object at one
+            // time, so the old contents stay until the new name is in place.
+            let aside = aside_name(&name);
+            if let Err(e) = fs.mtp.rename_object(old, &aside) {
+                eprintln!("mtpfs: cannot move the old {path} aside: {e}");
+                return -libc::EIO;
+            }
+        } else if free.saturating_add(old_size) >= size {
+            // Two copies do not fit. The old object goes first, and the spool
+            // file on the host holds the contents until the send ends.
+            eprintln!(
+                "mtpfs: {path} needs {} MB, and the cellphone has {} MB free. The old copy goes first.",
+                size / 1_000_000,
+                free / 1_000_000
+            );
+            if let Err(e) = fs.mtp.delete_object(old) {
+                eprintln!("mtpfs: cannot remove the old {path}: {e}");
+                return -libc::EIO;
+            }
+            p.replaces = None;
+            old_copy_exists = false;
+        } else {
+            eprintln!(
+                "mtpfs: {path} needs {} MB. The cellphone has {} MB free, and the old copy holds {} MB.",
+                size / 1_000_000,
+                free / 1_000_000,
+                old_size / 1_000_000
+            );
+            return -libc::ENOSPC;
+        }
+    }
+
     match fs.mtp.send_object_stream(parent, &name, &mut p.file, size) {
         Ok(_) => {
+            // The new contents hold the real name, so the old object can go.
+            if let Some(old) = p.replaces.take() {
+                if let Err(e) = fs.mtp.delete_object(old) {
+                    // The caller got what it asked for. A leftover object is
+                    // untidy, and is not a fault of the write.
+                    eprintln!("mtpfs: {path} is in place, and the old copy remains: {e}");
+                }
+            }
             // The folder holds a new object, so the listing is old.
             fs.tree.forget_listing(parent);
             0
         }
         Err(e) => {
             eprintln!("mtpfs: cannot write {path}: {e}");
+            // The new contents did not arrive. Put the old name back, so the
+            // caller sees the file it opened.
+            if let Some(old) = p.replaces.take() {
+                if let Err(e2) = fs.mtp.rename_object(old, &name) {
+                    eprintln!(
+                        "mtpfs: {path} is now under a name that ends with \
+                         .bsdroid-old, and the host cannot put it back: {e2}"
+                    );
+                }
+            }
+            if !old_copy_exists {
+                // The cellphone had no room for two copies, so the old object
+                // went first and the send then failed. The spool file is the
+                // only copy, so the spool file stays and its name goes to the
+                // log.
+                p.keep_spool = true;
+                eprintln!(
+                    "mtpfs: the cellphone holds no copy of {path}. The contents stay in {:?}.",
+                    p.spool
+                );
+            }
+            fs.tree.forget_listing(parent);
             -libc::EIO
         }
     }
@@ -804,8 +1198,13 @@ fn send_pending(fs: &mut Fs, p: &mut Pending, path: &str) -> i32 {
 /// `flush` can run more than one time for one open file, because `dup` and
 /// `fork` both make a second descriptor. The first run sends the object and
 /// keeps the answer. A later run gives the same answer and sends nothing.
-unsafe extern "C" fn op_flush(path: *const i8, _fi: *mut sys::fuse_file_info) -> i32 {
+unsafe extern "C" fn op_flush(path: *const i8, fi: *mut sys::fuse_file_info) -> i32 {
     let path = path_of(path);
+    // The close of a handle that reads must not send a file another handle is
+    // still writing. See the comment on `FH_WRITER`.
+    if !unsafe { fh_writes(fi) } {
+        return 0;
+    }
 
     with_fs(libc::EIO, |fs| {
         // Take the entry out, so the send can borrow the session.
@@ -834,8 +1233,13 @@ unsafe extern "C" fn op_flush(path: *const i8, _fi: *mut sys::fuse_file_info) ->
 /// that closes a file with no `flush` is rare, and the send happens here for
 /// that case. The kernel throws this answer away, so a fault here reaches
 /// nobody, which is the whole reason the send moved to `flush`.
-unsafe extern "C" fn op_release(path: *const i8, _fi: *mut sys::fuse_file_info) -> i32 {
+unsafe extern "C" fn op_release(path: *const i8, fi: *mut sys::fuse_file_info) -> i32 {
     let path = path_of(path);
+    // The close of a handle that reads must not remove the spool file of a
+    // handle that writes. See the comment on `FH_WRITER`.
+    if !unsafe { fh_writes(fi) } {
+        return 0;
+    }
 
     with_fs(0, |fs| {
         let Some(mut p) = fs.pending.remove(&path) else {
@@ -867,8 +1271,34 @@ unsafe extern "C" fn op_truncate(
                 p.size = size as u64;
                 0
             }
-            // A file on the device does not change size in this version.
-            None => -libc::EROFS,
+            None => {
+                // No program has the file open for writing. `truncate` on its
+                // own reaches here. The file adopts a spool, and the close of
+                // the spool sends the shorter file.
+                let handle = match resolve(fs, &path) {
+                    Some(h) => h,
+                    None => return -libc::ENOENT,
+                };
+                let entry = match fs.tree.get(handle) {
+                    Some(e) if !e.is_dir => e.clone(),
+                    _ => return -libc::EISDIR,
+                };
+                // A size of zero needs none of the old bytes.
+                let keep = size > 0;
+                if let Err(rc) = adopt_for_write(fs, &path, handle, &entry, keep) {
+                    return rc;
+                }
+                let p = fs.pending.get_mut(&path).expect("just inserted");
+                if let Err(e) = p.file.set_len(size as u64) {
+                    eprintln!("mtpfs: cannot set the size of the spool file: {e}");
+                    return -libc::EIO;
+                }
+                p.size = size as u64;
+                // Nothing will call `flush` for this path, because no program
+                // holds the file open. The send happens now.
+                let mut taken = fs.pending.remove(&path).expect("just inserted");
+                send_pending(fs, &mut taken, &path)
+            }
         }
     })
 }
@@ -957,9 +1387,35 @@ unsafe extern "C" fn op_read(
     fi: *mut sys::fuse_file_info,
 ) -> i32 {
     with_fs(libc::ENOENT, |fs| {
+        // A spool file holds bytes the cellphone has not seen. A program that
+        // opened a file to read and write it must see what it wrote, so the
+        // spool answers and the cellphone does not.
+        let p = path_of(path);
+        if let Some(pending) = fs.pending.get(&p) {
+            let offset = offset as u64;
+            if offset >= pending.size {
+                return 0;
+            }
+            let want = core::cmp::min(size as u64, pending.size - offset) as usize;
+            let mut out = vec![0u8; want];
+            use std::os::unix::fs::FileExt;
+            return match pending.file.read_at(&mut out, offset) {
+                Ok(n) => {
+                    // SAFETY: FUSE gives a buffer of `size` bytes, and `n` is
+                    // not larger than `want`.
+                    unsafe { core::ptr::copy_nonoverlapping(out.as_ptr(), buf as *mut u8, n) };
+                    n as i32
+                }
+                Err(e) => {
+                    eprintln!("mtpfs: cannot read the spool file: {e}");
+                    -libc::EIO
+                }
+            };
+        }
+
         // The handle comes from `open`, and a path is the fallback.
-        let handle = if !fi.is_null() && (unsafe { (*fi).fh }) != 0 {
-            (unsafe { (*fi).fh }) as u32
+        let handle = if !fi.is_null() && fh_handle(unsafe { (*fi).fh }) != 0 {
+            fh_handle(unsafe { (*fi).fh })
         } else {
             let p = path_of(path);
             match resolve(fs, &p) {
@@ -1021,6 +1477,8 @@ mod libc {
     pub const EROFS: i32 = 30;
     /// The device cannot do this operation.
     pub const ENOTSUP: i32 = 45;
+    /// No space is left on the device.
+    pub const ENOSPC: i32 = 28;
 }
 
 #[cfg(test)]
@@ -1099,5 +1557,33 @@ mod tests {
         let (p, f) = split(&["-f", "-o", "allow_other,ro", "-d", "/mnt/phone"]);
         assert_eq!(p, ["/mnt/phone"]);
         assert_eq!(f, ["-f", "-o", "allow_other,ro", "-d"]);
+    }
+
+    #[test]
+    fn a_write_flag_says_the_caller_writes() {
+        assert!(!oflag::writes(0));
+        assert!(oflag::writes(oflag::WRONLY));
+        assert!(oflag::writes(oflag::RDWR));
+        // O_TRUNC beside O_RDONLY is not a write. The access mode decides.
+        assert!(!oflag::writes(oflag::TRUNC));
+        assert!(oflag::writes(oflag::WRONLY | oflag::TRUNC));
+    }
+
+    #[test]
+    fn a_handle_keeps_its_value_beside_the_writer_mark() {
+        assert_eq!(fh_handle(u64::from(u32::MAX) | FH_WRITER), u32::MAX);
+        assert_eq!(fh_handle(FH_WRITER), 0);
+        assert_eq!(fh_handle(42), 42);
+        // The mark sits above every value an object handle can hold.
+        assert!(FH_WRITER > u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn a_name_that_moves_aside_is_new_each_time() {
+        let first = aside_name("report.txt");
+        let second = aside_name("report.txt");
+        assert_ne!(first, second);
+        assert!(first.starts_with("report.txt.bsdroid-old-"));
+        assert!(second.starts_with("report.txt.bsdroid-old-"));
     }
 }
