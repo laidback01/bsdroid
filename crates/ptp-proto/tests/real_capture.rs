@@ -158,8 +158,10 @@ fn a_header_parses_from_a_buffer_that_holds_only_the_header() {
 #[test]
 fn a_header_parses_when_the_container_is_larger_than_the_buffer() {
     // A container that declares 200000 bytes, with only 64 bytes present.
-    let mut bytes = ptp_proto::build(ContainerType::Data, 0x1007, 9, &[0u8; 52]);
-    bytes[0..4].copy_from_slice(&200_000u32.to_le_bytes());
+    // This is what the first transfer of a large data phase looks like, so the
+    // header says 199988 payload bytes follow and only 52 of them are here.
+    let mut bytes = ptp_proto::build_data_header(0x1007, 9, 199_988).expect("the length fits");
+    bytes.extend_from_slice(&[0u8; 52]);
 
     assert!(
         matches!(

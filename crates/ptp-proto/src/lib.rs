@@ -278,31 +278,130 @@ fn push_string(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(&0u16.to_le_bytes());
 }
 
-/// Builds a container for the wire.
+/// The largest payload one container carries, in bytes.
 ///
-/// The function writes the header and then the payload. The length field
-/// counts the header, which is what a device expects.
-pub fn build(kind: ContainerType, code: u16, transaction_id: u32, payload: &[u8]) -> Vec<u8> {
-    let length = (HEADER_LEN + payload.len()) as u32;
-    let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
+/// The length field is a `u32`, and the field counts the header. A payload
+/// above this count has no length that the field can hold.
+pub const MAX_PAYLOAD_LEN: usize = u32::MAX as usize - HEADER_LEN;
+
+/// The largest count of parameters a command container carries.
+///
+/// PTP gives a command five parameter slots.
+pub const MAX_PARAMS: usize = 5;
+
+/// A payload that does not fit the length field of a container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayloadTooLarge {
+    /// The count of payload bytes the caller gave.
+    pub len: u64,
+}
+
+impl fmt::Display for PayloadTooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the payload holds {} bytes, and one container holds {MAX_PAYLOAD_LEN} at most",
+            self.len
+        )
+    }
+}
+
+impl std::error::Error for PayloadTooLarge {}
+
+/// Gives the value of the length field for a payload of this size.
+///
+/// The length field counts the header, so the function adds [`HEADER_LEN`].
+///
+/// The function gives an error for a payload the field cannot count. An
+/// earlier version cast the sum to `u32` and let the sum wrap. A payload of
+/// 4294967295 bytes then declared a length of 11, which is below the header
+/// size, and the device read the next command as payload.
+pub fn container_length(payload_len: u64) -> Result<u32, PayloadTooLarge> {
+    if payload_len > MAX_PAYLOAD_LEN as u64 {
+        return Err(PayloadTooLarge { len: payload_len });
+    }
+    Ok(HEADER_LEN as u32 + payload_len as u32)
+}
+
+/// Writes the 12 byte header of a container.
+///
+/// The caller gives a length that [`container_length`] checked.
+fn push_header(
+    out: &mut Vec<u8>,
+    length: u32,
+    kind: ContainerType,
+    code: u16,
+    transaction_id: u32,
+) {
     out.extend_from_slice(&length.to_le_bytes());
     out.extend_from_slice(&kind.to_wire().to_le_bytes());
     out.extend_from_slice(&code.to_le_bytes());
     out.extend_from_slice(&transaction_id.to_le_bytes());
+}
+
+/// Builds a container for the wire.
+///
+/// The function writes the header and then the payload. The length field
+/// counts the header, which is what a device expects.
+///
+/// The function gives an error for a payload that the length field cannot
+/// count. See [`container_length`].
+pub fn build(
+    kind: ContainerType,
+    code: u16,
+    transaction_id: u32,
+    payload: &[u8],
+) -> Result<Vec<u8>, PayloadTooLarge> {
+    let length = container_length(payload.len() as u64)?;
+    let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
+    push_header(&mut out, length, kind, code, transaction_id);
     out.extend_from_slice(payload);
-    out
+    Ok(out)
+}
+
+/// Builds the header of a data container whose payload follows.
+///
+/// A large data phase does not fit in one USB transfer. The caller sends this
+/// header with the start of the payload, and then sends the rest. The length
+/// field counts the header, so the caller gives the size of the payload alone.
+///
+/// The function gives an error for a payload that the length field cannot
+/// count. See [`container_length`].
+pub fn build_data_header(
+    code: u16,
+    transaction_id: u32,
+    payload_len: u64,
+) -> Result<Vec<u8>, PayloadTooLarge> {
+    let length = container_length(payload_len)?;
+    let mut out = Vec::with_capacity(HEADER_LEN);
+    push_header(&mut out, length, ContainerType::Data, code, transaction_id);
+    Ok(out)
 }
 
 /// Builds a command container with `u32` parameters.
 ///
-/// The standard allows up to five parameters. The function does not check the
-/// count, because a device rejects a container it does not accept.
+/// PTP gives a command five parameter slots. The function sends the first
+/// [`MAX_PARAMS`] and drops the rest, because a device rejects a container
+/// with more.
+///
+/// The payload is therefore 20 bytes at most, and the length field always
+/// holds it. The function needs no error for that reason.
 pub fn build_command(code: u16, transaction_id: u32, params: &[u32]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(params.len() * 4);
-    for p in params {
-        payload.extend_from_slice(&p.to_le_bytes());
+    let take = core::cmp::min(params.len(), MAX_PARAMS);
+    let length = (HEADER_LEN + take * 4) as u32;
+
+    let mut out = Vec::with_capacity(HEADER_LEN + take * 4);
+    push_header(
+        &mut out,
+        length,
+        ContainerType::Command,
+        code,
+        transaction_id,
+    );
+    for p in &params[..take] {
+        out.extend_from_slice(&p.to_le_bytes());
     }
-    build(ContainerType::Command, code, transaction_id, &payload)
+    out
 }
 
 /// A cursor that reads fields from a buffer and checks every read.
@@ -869,6 +968,54 @@ mod tests {
         assert!(r.read_u64("wide").is_err());
         // The failed read must leave the cursor where it was.
         assert_eq!(r.remaining(), 3);
+    }
+
+    /// A payload of `u32::MAX` bytes once wrapped the length field to 11.
+    ///
+    /// A length of 11 is below the header size. The device then treats the
+    /// next command as payload, and the transfer never recovers.
+    #[test]
+    fn a_payload_that_does_not_fit_the_length_field_gives_an_error() {
+        assert_eq!(
+            container_length(u32::MAX as u64),
+            Err(PayloadTooLarge {
+                len: u32::MAX as u64
+            })
+        );
+        assert!(container_length(MAX_PAYLOAD_LEN as u64 + 1).is_err());
+        assert!(build_data_header(0x100d, 1, u32::MAX as u64).is_err());
+    }
+
+    #[test]
+    fn the_largest_payload_that_fits_gives_the_largest_length() {
+        assert_eq!(container_length(MAX_PAYLOAD_LEN as u64), Ok(u32::MAX));
+        assert_eq!(container_length(0), Ok(HEADER_LEN as u32));
+    }
+
+    /// The length field counts the header, so a header alone declares 12 plus
+    /// the payload that follows in later transfers.
+    #[test]
+    fn a_data_header_counts_the_payload_that_follows() {
+        let h = build_data_header(0x1009, 7, 200_000).unwrap();
+        assert_eq!(h.len(), HEADER_LEN, "the header carries no payload");
+
+        let parsed = Header::parse(&h).unwrap();
+        assert_eq!(parsed.length, 200_012);
+        assert_eq!(parsed.payload_len(), 200_000);
+        assert_eq!(parsed.kind, ContainerType::Data);
+        assert_eq!(parsed.code, 0x1009);
+        assert_eq!(parsed.transaction_id, 7);
+    }
+
+    /// PTP gives a command five parameter slots, so the payload cannot grow
+    /// past 20 bytes and the length field always holds it.
+    #[test]
+    fn a_command_sends_five_parameters_at_most() {
+        let all = build_command(0x1007, 3, &[1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(all.len(), HEADER_LEN + MAX_PARAMS * 4);
+
+        let c = Container::parse(&all).unwrap();
+        assert_eq!(c.parameters(), vec![1, 2, 3, 4, 5]);
     }
 }
 

@@ -177,7 +177,7 @@ impl std::fmt::Display for Error {
             Self::TooLarge { size } => write!(
                 f,
                 "the file holds {size} bytes, and MTP allows {} at most",
-                u32::MAX
+                ptp_proto::MAX_PAYLOAD_LEN
             ),
             Self::ShortRead { step, want, got } => {
                 write!(f, "{step}: the host promised {want} bytes and read {got}")
@@ -199,6 +199,11 @@ impl From<UsbError> for Error {
 impl From<ParseError> for Error {
     fn from(e: ParseError) -> Self {
         Self::Parse(e)
+    }
+}
+impl From<ptp_proto::PayloadTooLarge> for Error {
+    fn from(e: ptp_proto::PayloadTooLarge) -> Self {
+        Self::TooLarge { size: e.len }
     }
 }
 impl From<usb_freebsd::descriptor::DescriptorError> for Error {
@@ -810,6 +815,14 @@ impl Mtp {
         data: &[u8],
         is_folder: bool,
     ) -> Result<u32, Error> {
+        // See the note in `send_object_stream`. The size goes in a 32 bit
+        // field, and the data container counts the header as well.
+        if data.len() as u64 > ptp_proto::MAX_PAYLOAD_LEN as u64 {
+            return Err(Error::TooLarge {
+                size: data.len() as u64,
+            });
+        }
+
         let info = ptp_proto::ObjectInfo::build_for_send(
             self.storage,
             parent,
@@ -934,9 +947,13 @@ impl Mtp {
         reader: &mut R,
         size: u64,
     ) -> Result<u32, Error> {
-        // MTP gives 32 bits for the size of an object. A file of 4 GB or more
-        // needs the 64-bit form, which this version does not send.
-        if size > u32::MAX as u64 {
+        // MTP gives 32 bits for the size of an object, and the length field of
+        // the data container must also count the 12 byte header. The limit is
+        // therefore `MAX_PAYLOAD_LEN`, and not `u32::MAX`.
+        //
+        // An earlier version compared against `u32::MAX`. A file of exactly
+        // that size then passed the guard, and the length field wrapped to 11.
+        if size > ptp_proto::MAX_PAYLOAD_LEN as u64 {
             return Err(Error::TooLarge { size });
         }
 
@@ -992,9 +1009,8 @@ impl Mtp {
         self.channels.write.write(&command, timeout())?;
 
         // The first write holds the header, and the start of the payload.
-        let total = (ptp_proto::HEADER_LEN as u64 + size) as u32;
-        let mut first = ptp_proto::build(ptp_proto::ContainerType::Data, code, tid, &[]);
-        first[0..4].copy_from_slice(&total.to_le_bytes());
+        let total = ptp_proto::container_length(size)?;
+        let mut first = ptp_proto::build_data_header(code, tid, size)?;
 
         let mut buf = vec![0u8; write_chunk()];
         let room = write_chunk() - ptp_proto::HEADER_LEN;
@@ -1081,11 +1097,8 @@ impl Mtp {
 
         // The data container holds the header and the payload. A large payload
         // goes in parts, because one transfer has a limit.
-        let header = ptp_proto::build(ptp_proto::ContainerType::Data, code, tid, &[]);
-        let total = (ptp_proto::HEADER_LEN + payload.len()) as u32;
-
-        let mut first = header.clone();
-        first[0..4].copy_from_slice(&total.to_le_bytes());
+        let total = ptp_proto::container_length(payload.len() as u64)?;
+        let mut first = ptp_proto::build_data_header(code, tid, payload.len() as u64)?;
 
         // The first write holds the header and as much payload as fits.
         let room = write_chunk() - ptp_proto::HEADER_LEN;

@@ -122,17 +122,7 @@ fn main() -> std::process::ExitCode {
     let argv: Vec<String> = std::env::args().collect();
     let args = &argv[1..];
 
-    // Separate what this program reads from what FUSE reads. An argument that
-    // starts with `-` goes to FUSE, and the rest name a device and a folder.
-    let mut positional: Vec<&str> = Vec::new();
-    let mut fuse_args: Vec<&str> = Vec::new();
-    for a in args {
-        if a.starts_with('-') {
-            fuse_args.push(a);
-        } else {
-            positional.push(a);
-        }
-    }
+    let (positional, fuse_args) = split_args(args);
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         usage();
@@ -270,6 +260,47 @@ fn list_devices() -> std::process::ExitCode {
     }
 }
 
+/// The options that take their value in the next argument.
+///
+/// FUSE reads the mount options after `-o`. A splitter that does not know
+/// this reads `allow_other` as the name of a device, and the mount then fails
+/// with a message about a device node.
+const OPTIONS_WITH_VALUE: [&str; 1] = ["-o"];
+
+/// Separates what this program reads from what FUSE reads.
+///
+/// An argument that starts with `-` goes to FUSE. The rest name a device and
+/// a folder. An option in [`OPTIONS_WITH_VALUE`] also takes the argument that
+/// follows it, so the value does not read as a device name.
+///
+/// The attached form, such as `-oallow_other`, needs no second argument, and
+/// the first rule already covers it.
+fn split_args(args: &[String]) -> (Vec<&str>, Vec<&str>) {
+    let mut positional: Vec<&str> = Vec::new();
+    let mut fuse_args: Vec<&str> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a.starts_with('-') {
+            fuse_args.push(a);
+            if OPTIONS_WITH_VALUE.contains(&a) {
+                // A trailing `-o` with no value is a user fault, and FUSE
+                // reports it. The host must not read past the end here.
+                if let Some(v) = args.get(i + 1) {
+                    fuse_args.push(v.as_str());
+                    i += 1;
+                }
+            }
+        } else {
+            positional.push(a);
+        }
+        i += 1;
+    }
+
+    (positional, fuse_args)
+}
+
 fn usage() {
     println!("mtpfs {}", env!("CARGO_PKG_VERSION"));
     println!();
@@ -293,8 +324,9 @@ fn usage() {
     println!("  3. Put the cellphone into file transfer mode.");
     println!();
     println!("Options go to FUSE:");
-    println!("  -f    Stay in the foreground, and write messages.");
-    println!("  -d    Stay in the foreground, and write each request.");
+    println!("  -f            Stay in the foreground, and write messages.");
+    println!("  -d            Stay in the foreground, and write each request.");
+    println!("  -o <options>  Give mount options to FUSE.");
     println!();
     println!("To stop:");
     println!("  umount <mount point>");
@@ -916,4 +948,83 @@ fn libc_enotdir() -> i32 {
 }
 fn libc_enotsup() -> i32 {
     45
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn split(args: &[&str]) -> (Vec<String>, Vec<String>) {
+        let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let (p, f) = split_args(&owned);
+        (
+            p.iter().map(|s| (*s).to_string()).collect(),
+            f.iter().map(|s| (*s).to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn a_folder_alone_is_a_mount_point() {
+        let (p, f) = split(&["/mnt/phone"]);
+        assert_eq!(p, ["/mnt/phone"]);
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn a_device_and_a_folder_both_read_as_names() {
+        let (p, f) = split(&["ugen0.11", "/mnt/phone"]);
+        assert_eq!(p, ["ugen0.11", "/mnt/phone"]);
+        assert!(f.is_empty());
+    }
+
+    /// The value of `-o` must not read as the name of a device.
+    ///
+    /// An earlier version split on the leading `-` alone. The command
+    /// `mtpfs -o allow_other /mnt/phone` then gave two names, and the host
+    /// reported that `allow_other` is not a device node.
+    #[test]
+    fn the_value_of_a_mount_option_is_not_a_device_name() {
+        let (p, f) = split(&["-o", "allow_other", "/mnt/phone"]);
+        assert_eq!(p, ["/mnt/phone"], "the mount point is the only name");
+        assert_eq!(f, ["-o", "allow_other"]);
+    }
+
+    #[test]
+    fn a_mount_option_works_with_a_device_as_well() {
+        let (p, f) = split(&["-o", "ro", "ugen0.11", "/mnt/phone"]);
+        assert_eq!(p, ["ugen0.11", "/mnt/phone"]);
+        assert_eq!(f, ["-o", "ro"]);
+    }
+
+    /// `-oallow_other` holds the value in the same argument, so the rule for
+    /// a leading `-` already covers it.
+    #[test]
+    fn an_attached_mount_option_needs_no_second_argument() {
+        let (p, f) = split(&["-oallow_other", "/mnt/phone"]);
+        assert_eq!(p, ["/mnt/phone"]);
+        assert_eq!(f, ["-oallow_other"]);
+    }
+
+    #[test]
+    fn an_option_that_takes_no_value_keeps_the_next_name() {
+        let (p, f) = split(&["-f", "ugen0.11", "/mnt/phone"]);
+        assert_eq!(p, ["ugen0.11", "/mnt/phone"]);
+        assert_eq!(f, ["-f"]);
+    }
+
+    /// A trailing `-o` is a user fault. The splitter must not read past the
+    /// end of the argument list.
+    #[test]
+    fn a_trailing_option_with_no_value_does_not_read_past_the_end() {
+        let (p, f) = split(&["/mnt/phone", "-o"]);
+        assert_eq!(p, ["/mnt/phone"]);
+        assert_eq!(f, ["-o"]);
+    }
+
+    #[test]
+    fn many_options_all_reach_fuse() {
+        let (p, f) = split(&["-f", "-o", "allow_other,ro", "-d", "/mnt/phone"]);
+        assert_eq!(p, ["/mnt/phone"]);
+        assert_eq!(f, ["-f", "-o", "allow_other,ro", "-d"]);
+    }
 }
