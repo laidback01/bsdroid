@@ -211,6 +211,27 @@ unsafe fn fh_writes(fi: *const sys::fuse_file_info) -> bool {
     unsafe { (*fi).fh & FH_WRITER != 0 }
 }
 
+// `geteuid` and `getegid` give the user that runs the mount.
+extern "C" {
+    fn geteuid() -> u32;
+    fn getegid() -> u32;
+}
+
+/// Gives the user and the group that the filesystem reports for each object.
+///
+/// MTP holds no owner. An earlier version reported user 0 and group 0, and
+/// `ls -l` then showed each file as a file of root. A person who mounts the
+/// cellphone as their own account saw files they could write and that looked
+/// like files of another user. A file manager showed the same.
+///
+/// The mount reports the user that runs the mount, because that user is the
+/// only user the mount serves.
+fn owner() -> (u32, u32) {
+    static OWNER: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    // SAFETY: both calls read the state of this process and take no pointer.
+    *OWNER.get_or_init(|| unsafe { (geteuid(), getegid()) })
+}
+
 /// The mode bits for a folder that a user can read and enter.
 const MODE_DIR: u32 = 0o040_755;
 /// The mode bits for a file that a user can read.
@@ -237,6 +258,9 @@ fn main() -> std::process::ExitCode {
     }
     if args.iter().any(|a| a == "-l" || a == "--list") {
         return list_devices();
+    }
+    if args.iter().any(|a| a == "--name") {
+        return print_name(positional.first().copied());
     }
 
     // The form follows `mount_msdosfs`: a device, and then a folder.
@@ -348,6 +372,33 @@ fn main() -> std::process::ExitCode {
 }
 
 /// Writes one line for each device that gives an MTP interface.
+/// Writes the name the device gives for itself, and nothing else.
+///
+/// The name comes from `DeviceInfo`, and holds the maker and the model, such
+/// as `samsung SM-S901U`. The listing from `-l` holds the name from the USB
+/// descriptor, which is `SAMSUNG SAMSUNG_Android` for the same cellphone. The
+/// name of the model is the better name for a person.
+///
+/// The automount helper uses this for the name of the mount point. A mount
+/// point that holds the name of the model stays the same name, because the
+/// model does not change. A name from the product identifier does change,
+/// because a cellphone gives a different product for each USB mode.
+///
+/// The command fails for a cellphone that gives no MTP. The helper reads that
+/// as "not in file transfer mode", and stops without a message.
+fn print_name(node: Option<&str>) -> std::process::ExitCode {
+    match Mtp::open(node, Settings::from_env()) {
+        Ok(m) => {
+            println!("{}", m.name());
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("mtpfs: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 fn list_devices() -> std::process::ExitCode {
     match Mtp::list_devices(Settings::from_env()) {
         Ok(list) if list.is_empty() => {
@@ -423,6 +474,7 @@ fn usage() {
     println!("Usage:");
     println!("  mtpfs [device] <mount point> [options]");
     println!("  mtpfs -l");
+    println!("  mtpfs --name [device]");
     println!();
     println!("The device is a node name, such as ugen0.11 or /dev/ugen0.11.");
     println!("With no device, the program takes the first cellphone it finds.");
@@ -431,6 +483,7 @@ fn usage() {
     println!("  mtpfs /mnt/phone              the first cellphone");
     println!("  mtpfs ugen0.11 /mnt/phone     one named cellphone");
     println!("  mtpfs -l                      each cellphone the host sees");
+    println!("  mtpfs --name ugen0.11         the name one cellphone gives");
     println!();
     println!("Before you start:");
     println!("  1. Connect the cellphone.");
@@ -515,6 +568,9 @@ unsafe extern "C" fn op_getattr(
                 (*st).st_nlink = 1;
                 (*st).st_size = size as sys::off_t;
                 (*st).st_blksize = 65536;
+                let (uid, gid) = owner();
+                (*st).st_uid = uid as sys::uid_t;
+                (*st).st_gid = gid as sys::gid_t;
             }
             return 0;
         }
@@ -542,6 +598,9 @@ unsafe extern "C" fn op_getattr(
             (*st).st_mode = mode as sys::mode_t;
             (*st).st_nlink = links;
             (*st).st_size = size as sys::off_t;
+            let (uid, gid) = owner();
+            (*st).st_uid = uid as sys::uid_t;
+            (*st).st_gid = gid as sys::gid_t;
             (*st).st_blocks = size.div_ceil(512) as sys::blkcnt_t;
             (*st).st_blksize = 65536;
         }

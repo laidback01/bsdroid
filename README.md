@@ -469,6 +469,48 @@ afterwards, not just the exit status, and it fails if the folder is left with
 anything unexpected in it. The code before this feature scored 4 of 19; all
 three test phones now score 19 of 19.
 
+## Mount it by plugging it in
+
+FreeBSD's `autofs` is the wrong tool for this: it mounts when something *reads*
+the path, not when the device arrives, and `automountd` mounts through
+`mount -t <type>` which needs a `/sbin/mount_<type>` helper that a FUSE
+filesystem doesn't have. `devd` is the right mechanism — it's the FreeBSD
+equivalent of a udev rule, and it fires on USB attach and detach.
+
+```
+doas cp tools/automount/bsdroid.conf /usr/local/etc/devd/
+doas cp tools/automount/bsdroid-automount /usr/local/sbin/
+doas cp tools/automount/bsdroid-automount.conf.sample \
+    /usr/local/etc/bsdroid-automount.conf
+doas service devd restart
+```
+
+Then set your account in `/usr/local/etc/bsdroid-automount.conf`:
+
+```
+MOUNT_USER="jax"
+```
+
+Plug the phone in, pick File Transfer, and it appears:
+
+```
+mtpfs on /media/samsung-sm-s901u (fusefs, nosuid, mounted by jax)
+```
+
+The mount runs as *you*, not root, so no `allow_other` and no root-owned files
+— your account needs `vfs.usermount=1` and membership of `operator`. The
+folder is named from the phone's own model name (`mtpfs --name`), which does
+not change with the USB mode, so a bookmark in your file manager keeps
+working. Unplug it and the mount goes away.
+
+The rule in `bsdroid.conf` matches the vendor, not the product, because an
+Android phone reports a different product ID in every USB mode. Change the
+vendor for a phone that is not a Samsung; `mtpfs -l` prints it.
+
+`docs/11-automount.md` explains the parts that are less obvious: why a phone
+fires two attach events, why the helper needs a lock, and why testing whether
+a mount is alive has to be done as the mount's owner.
+
 Run `mtpfs -l` for the vendor and the product of a cellphone.
 
 ## How this was built

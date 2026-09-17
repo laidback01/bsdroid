@@ -415,7 +415,58 @@ impl Mtp {
     ///
     /// The function gives an error when the device cannot read part of a file,
     /// because a filesystem cannot work without that operation.
+    /// Says whether another try can work for this error.
+    ///
+    /// MTP gives one session at a time. A program that closes a session
+    /// leaves the device busy for a moment, and `OpenSession` for the next
+    /// program then gives a timeout. A measurement on a Samsung:
+    ///
+    /// | When                         | What OpenSession gave |
+    /// | ---------------------------- | --------------------- |
+    /// | at once after an unmount     | timed out             |
+    /// | one second later             | the session           |
+    ///
+    /// A person who unmounts and mounts again meets this, and so does the
+    /// automount helper for a cellphone that joins the bus twice. Another try
+    /// costs one second, and the answer is then the right answer.
+    ///
+    /// A fault of the device, a name that does not parse, and a device that
+    /// lacks an operation are all answers that do not change. `find` holds
+    /// its own patience, so a missing device does not come here.
+    fn worth_another_try(e: &Error) -> bool {
+        matches!(e, Error::Usb(_) | Error::Session(_))
+    }
+
+    /// Finds a device, opens a session, and reads what the device can do.
+    ///
+    /// The function tries more than one time for an error that another try can
+    /// answer. See `worth_another_try`.
     pub fn open(node: Option<&str>, settings: Settings) -> Result<Self, Error> {
+        let mut last = None;
+        for attempt in 1..=FIND_ATTEMPTS {
+            match Self::open_once(node, settings) {
+                Ok(m) => {
+                    if attempt > 1 && settings.debug {
+                        eprintln!("mtpfs: the session opened on attempt {attempt}");
+                    }
+                    return Ok(m);
+                }
+                Err(e) if Self::worth_another_try(&e) => {
+                    if settings.debug {
+                        eprintln!("mtpfs: attempt {attempt} gave: {e}");
+                    }
+                    last = Some(e);
+                    if attempt < FIND_ATTEMPTS {
+                        std::thread::sleep(FIND_WAIT);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or(Error::NoDevice))
+    }
+
+    fn open_once(node: Option<&str>, settings: Settings) -> Result<Self, Error> {
         let want = match node {
             Some(n) => {
                 Some(discover::parse_selector(n).ok_or_else(|| Error::BadNode(n.to_string()))?)
