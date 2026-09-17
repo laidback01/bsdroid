@@ -120,20 +120,74 @@ pub fn list(backend: &Rc<Backend>, timeout: Duration) -> Vec<Found> {
         .collect()
 }
 
+/// How a caller names one device.
+///
+/// # A node name is not a name for a cellphone
+///
+/// FreeBSD builds a node name from the bus and the address, and it gives the
+/// address when the device attaches. A cellphone that leaves the bus and comes
+/// back can therefore take the address that another cellphone had.
+///
+/// A measurement with three cellphones, over ten minutes of connects and
+/// disconnects:
+///
+/// ```text
+/// Cyrus CS 24            ugen0.12  0.13  0.12  0.11  0.12  0.13  0.12
+/// Samsung SM-S901U       ugen0.13  0.12  0.11  0.12  0.11  0.12  0.13
+/// Motorola Moto G (5)    ugen0.11  0.13  0.11
+/// ```
+///
+/// All three held `ugen0.11` at some point. A caller that names `ugen0.11`
+/// after a reconnect can therefore reach a cellphone it did not mean, and
+/// write files to it.
+///
+/// The vendor and the product do not change. Name a device that way when the
+/// answer must stay right across a reconnect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selector {
+    /// A bus and an address, as in `ugen0.11`. Not stable across a reconnect.
+    Node(Node),
+    /// A vendor and a product, as in `04e8:6860`. Stable.
+    Ids { vendor: u16, product: u16 },
+}
+
+impl Selector {
+    /// Tells you if a device matches.
+    fn matches(&self, handle: &DeviceHandle) -> bool {
+        match *self {
+            Self::Node((bus, address)) => handle.bus() == bus && handle.address() == address,
+            Self::Ids { vendor, product } => handle.ids() == (vendor, product),
+        }
+    }
+}
+
+/// Reads the name of a device from a command line.
+///
+/// The function takes a node name, such as `ugen0.11` or `/dev/ugen0.11`, and
+/// a pair of identifiers, such as `04e8:6860`. `mtpfs -l` prints both.
+pub fn parse_selector(s: &str) -> Option<Selector> {
+    if let Some((v, p)) = s.split_once(':') {
+        let vendor = u16::from_str_radix(v.trim_start_matches("0x"), 16).ok()?;
+        let product = u16::from_str_radix(p.trim_start_matches("0x"), 16).ok()?;
+        return Some(Selector::Ids { vendor, product });
+    }
+    parse_node(s).map(Selector::Node)
+}
+
 /// Finds one device that offers an MTP interface.
 ///
-/// `node` names a bus and an address, as `parse_node` reads them from a name
-/// such as `ugen0.11`. A value of `None` takes the first device the host
-/// finds.
+/// A value of `None` takes the first device the host finds. See [`Selector`]
+/// for the two ways to name one device, and for why a node name can point at
+/// a cellphone the caller did not mean.
 ///
 /// The function stops at the first match, so it opens no device it does not
 /// need.
-pub fn find(backend: &Rc<Backend>, node: Option<Node>, timeout: Duration) -> Option<Found> {
+pub fn find(backend: &Rc<Backend>, want: Option<Selector>, timeout: Duration) -> Option<Found> {
     for handle in backend.devices() {
         // A caller that names a device gets that device, and no other. The
         // check comes before the open, because an open costs time.
-        if let Some((bus, address)) = node {
-            if handle.bus() != bus || handle.address() != address {
+        if let Some(sel) = want {
+            if !sel.matches(&handle) {
                 continue;
             }
         }
@@ -196,6 +250,43 @@ pub fn parse_node(s: &str) -> Option<Node> {
 #[cfg(test)]
 mod tests {
     use super::parse_node;
+
+    #[test]
+    fn a_pair_of_identifiers_reads_as_a_selector() {
+        use super::{parse_selector, Selector};
+        assert_eq!(
+            parse_selector("04e8:6860"),
+            Some(Selector::Ids {
+                vendor: 0x04e8,
+                product: 0x6860
+            })
+        );
+        assert_eq!(
+            parse_selector("0x04e8:0x6860"),
+            Some(Selector::Ids {
+                vendor: 0x04e8,
+                product: 0x6860
+            })
+        );
+    }
+
+    #[test]
+    fn a_node_name_reads_as_a_selector() {
+        use super::{parse_selector, Selector};
+        assert_eq!(parse_selector("ugen0.11"), Some(Selector::Node((0, 11))));
+        assert_eq!(
+            parse_selector("/dev/ugen0.11"),
+            Some(Selector::Node((0, 11)))
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_neither_gives_nothing() {
+        use super::parse_selector;
+        assert_eq!(parse_selector("allow_other"), None);
+        assert_eq!(parse_selector("zzzz:zzzz"), None);
+        assert_eq!(parse_selector(""), None);
+    }
 
     #[test]
     fn a_node_name_reads_in_both_forms() {

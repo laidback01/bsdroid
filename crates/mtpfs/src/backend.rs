@@ -168,8 +168,9 @@ impl std::fmt::Display for Error {
             }
             Self::BadNode(n) => write!(
                 f,
-                "the name {n} does not read as a device node. A node name looks \
-                 like ugen0.11, or /dev/ugen0.11"
+                "the name {n} does not read as a device. Give a node name, \
+                 such as ugen0.11, or a pair of identifiers, such as \
+                 04e8:6860. Run `mtpfs -l` for both"
             ),
             Self::NamedDeviceNotFound(n) => write!(
                 f,
@@ -370,7 +371,9 @@ impl Mtp {
     /// because a filesystem cannot work without that operation.
     pub fn open(node: Option<&str>, settings: Settings) -> Result<Self, Error> {
         let want = match node {
-            Some(n) => Some(discover::parse_node(n).ok_or_else(|| Error::BadNode(n.to_string()))?),
+            Some(n) => {
+                Some(discover::parse_selector(n).ok_or_else(|| Error::BadNode(n.to_string()))?)
+            }
             None => None,
         };
         // Every handle holds a share of the backend, so the backend lives for

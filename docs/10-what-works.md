@@ -393,12 +393,21 @@ that cable went in as well.
 
 The question is the one `docs/00-why.md` asks. Does a command come back?
 
-| Path  | Cellphone           | Mounts | Faults | Hangs | Wrong bytes |
-| ----- | ------------------- | ------ | ------ | ----- | ----------- |
-| read  | Cyrus CS 24         | 5      | 5      | 0     | n/a         |
-| write | Cyrus CS 24         | 3      | 2      | 0     | 0           |
-| write | Samsung SM-S901U    | 5      | 4      | 0     | 0           |
-| write | Motorola Moto G (5) | 4      | 3      | 0     | 0           |
+| Path  | Cellphone           | Mounts | Worked | Faults | Hangs | Wrong bytes | Lost |
+| ----- | ------------------- | ------ | ------ | ------ | ----- | ----------- | ---- |
+| read  | Cyrus CS 24         | 5      | many   | 5      | 0     | n/a         | n/a  |
+| read  | Motorola Moto G (5) | 6      | many   | 4      | 0     | n/a         | n/a  |
+| write | Cyrus CS 24         | 20     | 236    | 72     | 0     | 0           | 0    |
+| write | Samsung SM-S901U    | 19     | 188    | 68     | 0     | 0           | 0    |
+| write | Motorola Moto G (5) | 15     | 159    | 56     | 0     | 0           | 0    |
+
+The three write rows ran at the same time, on one host, with three mounts
+open. Each write copies 24 MiB and reads the file back to compare the sum. The
+583 writes that worked therefore moved about 14 GB, and every one of them came
+back with the bytes it went out with.
+
+The slowest command took 2 seconds. The deadline is 45 seconds for a read and
+120 seconds for a write.
 
 A fault is a pass. The cellphone is gone, so a command that refuses is right.
 A command that never comes back is the defect this project exists to avoid.

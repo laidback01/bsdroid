@@ -257,6 +257,17 @@ mtpfs ugen0.11 /mnt/phone
 
 A node name also takes the full form, `/dev/ugen0.11`.
 
+A node name is not stable. FreeBSD gives the address when a cellphone
+attaches, so a cellphone that leaves the bus and comes back can take the node
+another cellphone had. Name the cellphone by its identifiers when the answer
+must stay right:
+
+```
+mtpfs 04e8:6860 /mnt/phone
+```
+
+`mtpfs -l` prints both names. See `docs/02-device-states.md`.
+
 With no device, the program takes the first cellphone it finds:
 
 ```

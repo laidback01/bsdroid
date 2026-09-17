@@ -381,3 +381,46 @@ The README asks you to use a good cable. This is one of the reasons.
 
 A repeated fall into charge only mode is a sign of a cable, and not a sign of
 a cellphone or a host. Change the cable first.
+
+## A node name does not name a cellphone
+
+FreeBSD builds a node name from the bus and the address. When a device
+attaches, the kernel gives it an address. The name therefore belongs to a
+moment, and not to a cellphone.
+
+A person moved three cellphones between the ports of one host for ten minutes.
+The nodes each cellphone held, in order:
+
+```text
+Cyrus CS 24            ugen0.12  0.13  0.12  0.11  0.12  0.13  0.12
+Samsung SM-S901U       ugen0.13  0.12  0.11  0.12  0.11  0.12  0.13
+Motorola Moto G (5)    ugen0.11  0.13  0.11
+```
+
+All three held `ugen0.11`. Two of them traded places: the Samsung took the
+node the Cyrus had, and the Cyrus took the node the Samsung had.
+
+### What this does to a command
+
+A person who writes
+
+```text
+mtpfs ugen0.12 /mnt/phone
+```
+
+reaches one cellphone today and another cellphone after a reconnect. A script
+that copies files can therefore write to a cellphone the person did not mean.
+
+The vendor and the product do not change. Both programs take that form:
+
+```text
+mtpfs 04e8:6860 /mnt/phone
+mtpprobe -d 0e8d:2008 probe
+```
+
+`mtpfs -l` prints both names for each cellphone.
+
+### The rule
+
+Use a node name for one command that you watch. Use the identifiers in a
+script, and for any command that must reach the same cellphone twice.

@@ -15,7 +15,7 @@ use mtp_session::{Config, Session, SessionOpen};
 use ptp_proto::{association, op, resp, DeviceInfo, ObjectInfo, StorageInfo};
 use usb_freebsd::descriptor::MtpInterface;
 use usb_freebsd::device::{Backend, LinkSpeed, MtpDevice, OpenDevice};
-use usb_freebsd::discover::{self, Node};
+use usb_freebsd::discover::{self, Selector};
 
 /// The deadline for one transfer.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -105,7 +105,7 @@ struct Connected {
 ///
 /// `quiet` stops the report about the device. `needs_storage` is false for a
 /// command that reads what the device can do and touches no file.
-fn connect(node: Option<Node>, quiet: bool, needs_storage: bool) -> Result<Connected, String> {
+fn connect(node: Option<Selector>, quiet: bool, needs_storage: bool) -> Result<Connected, String> {
     let backend = Rc::new(Backend::new().map_err(|e| e.to_string())?);
     let (mut open, iface) = find_mtp(&backend, node, quiet)?;
 
@@ -217,7 +217,7 @@ fn main() -> ExitCode {
 }
 
 /// The device the user chose, and the arguments that remain.
-type Chosen = (Option<Node>, Vec<String>);
+type Chosen = (Option<Selector>, Vec<String>);
 
 /// Takes `-d <node>` off the front of the arguments.
 ///
@@ -232,10 +232,9 @@ fn split_device(args: &[String]) -> Result<Chosen, String> {
             let name = args
                 .get(i + 1)
                 .ok_or_else(|| format!("{} needs the name of a device", args[i]))?;
-            node = Some(
-                discover::parse_node(name)
-                    .ok_or_else(|| format!("{name} does not read as a device node"))?,
-            );
+            node = Some(discover::parse_selector(name).ok_or_else(|| {
+                format!("{name} does not read as a device node or a pair of identifiers")
+            })?);
             i += 2;
             continue;
         }
@@ -274,7 +273,7 @@ fn usage() {
 /// first device the host finds.
 fn find_mtp(
     backend: &Rc<Backend>,
-    node: Option<Node>,
+    node: Option<Selector>,
     quiet: bool,
 ) -> Result<(OpenDevice, MtpInterface), String> {
     if !quiet {
@@ -329,12 +328,23 @@ fn find_mtp(
 /// The message names the cause when the host can tell the cause. An Android
 /// device that is not in file transfer mode still shows adb, if the user turned
 /// on USB debugging. The adb interface is the sign.
-fn no_mtp_message(backend: &Rc<Backend>, node: Option<Node>) -> String {
-    if let Some((bus, address)) = node {
-        return format!(
-            "ugen{bus}.{address} gives no MTP interface. Run `mtpfs -l` for a list \n  \
-             of the devices that do."
-        );
+fn no_mtp_message(backend: &Rc<Backend>, want: Option<Selector>) -> String {
+    match want {
+        Some(Selector::Node((bus, address))) => {
+            return format!(
+                "ugen{bus}.{address} gives no MTP interface. A node name also \n  \
+                 changes when a cellphone leaves the bus and comes back. Run \n  \
+                 `mtpfs -l` for a list, and name the cellphone by its \n  \
+                 identifiers to hold the answer across a reconnect."
+            );
+        }
+        Some(Selector::Ids { vendor, product }) => {
+            return format!(
+                "{vendor:04x}:{product:04x} gives no MTP interface. Run \
+                 `mtpfs -l` for a list."
+            );
+        }
+        None => {}
     }
 
     let android = discover::android_without_mtp(backend, TIMEOUT);
@@ -367,7 +377,7 @@ fn no_mtp_message(backend: &Rc<Backend>, node: Option<Node>) -> String {
 }
 
 /// Reads the device one time.
-fn probe(node: Option<Node>) -> Result<(), String> {
+fn probe(node: Option<Selector>) -> Result<(), String> {
     println!();
     println!("--- Session 1 ---");
     let c = connect(node, false, true)?;
@@ -444,7 +454,7 @@ fn probe(node: Option<Node>) -> Result<(), String> {
 /// This test repeats the pattern that `simple-mtpfs` uses. A USB device open
 /// is not the same as a PTP session open. The PTP session cycle already works,
 /// so the USB device cycle is the difference that no test covers yet.
-fn reopen(node: Option<Node>, cycles: u32) -> Result<(), String> {
+fn reopen(node: Option<Selector>, cycles: u32) -> Result<(), String> {
     println!("--- USB device open and close cycle ---");
     println!("The test opens the USB device, reads the storage, and closes the");
     println!("device. The test repeats the cycle {cycles} times.");
@@ -534,7 +544,7 @@ fn reopen(node: Option<Node>, cycles: u32) -> Result<(), String> {
 ///
 /// The object count also separates file transfer mode from image mode. See
 /// `docs/02-device-states.md`.
-fn objects(node: Option<Node>) -> Result<(), String> {
+fn objects(node: Option<Selector>) -> Result<(), String> {
     let c = connect(node, false, true)?;
     let (mut s, storage) = (c.session, c.storage);
     println!();
@@ -624,7 +634,7 @@ const BENCH_SEARCH: usize = 120;
 /// The benchmark uses the files of the device, because the project cannot ship
 /// a file. The sizes are therefore not the same on two phones. The report
 /// gives the size of each file, so a reader can compare two reports.
-fn bench(node: Option<Node>) -> Result<(), String> {
+fn bench(node: Option<Selector>) -> Result<(), String> {
     let c = connect(node, false, true)?;
     let (mut s, storage) = (c.session, c.storage);
 
@@ -871,7 +881,7 @@ fn human(bytes: usize) -> String {
 /// `GetDeviceInfo` gives the operations a device supports. The list decides
 /// what a filesystem on top of the device can do, so a filesystem needs this
 /// answer before the design, and not after.
-fn caps(node: Option<Node>) -> Result<(), String> {
+fn caps(node: Option<Selector>) -> Result<(), String> {
     // A report of what the device can do needs no storage, so this command
     // does not wait for the storage list to fill.
     let mut s = connect(node, false, false)?.session;
@@ -1012,7 +1022,7 @@ const SEARCH_LIMIT: usize = 60;
 ///
 /// The command writes the payload to the file as the payload arrives. The host
 /// does not hold the object in memory, so a large file needs no large memory.
-fn get(node: Option<Node>, handle: Option<u32>) -> Result<(), String> {
+fn get(node: Option<Selector>, handle: Option<u32>) -> Result<(), String> {
     let c = connect(node, false, true)?;
     let (mut s, storage) = (c.session, c.storage);
 
@@ -1246,7 +1256,7 @@ fn report_no_storage(w: &StorageWait) {
 /// A reset makes the device leave the bus and come back. The device is then in
 /// the state a user gets after a connect. The test needs no person to pull the
 /// cable.
-fn coldstart(node: Option<Node>) -> Result<(), String> {
+fn coldstart(node: Option<Selector>) -> Result<(), String> {
     println!("--- Cold start test ---");
     println!("The test resets the device, waits for the device to come back,");
     println!("and measures the time until the device reports a storage.");
