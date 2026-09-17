@@ -334,6 +334,12 @@ unsafe extern "C" fn op_read(
     }
     let want = core::cmp::min(size as u64, file_size - offset) as usize;
 
+    // BSDROID_DEBUG reports the size FUSE asks for. The size sets the count of
+    // round trips a copy needs, and the count sets the rate.
+    if std::env::var("BSDROID_DEBUG").is_ok() {
+        eprintln!("read: offset {offset} size {size} want {want}");
+    }
+
     let data = match fs.mtp.read_at(handle, offset, want, file_size) {
         Ok(d) => d,
         Err(_) => return -libc_eio(),

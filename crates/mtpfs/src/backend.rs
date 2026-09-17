@@ -17,10 +17,26 @@ use crate::tree::{Entry, ROOT};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The size of one read, in bytes.
-const READ_BUFFER: usize = 64 * 1024;
+///
+/// A larger buffer needs fewer reads for one data phase. FUSE asks for 131072
+/// bytes, so a buffer above that size reads a whole answer in one call.
+const READ_BUFFER: usize = 1024 * 1024;
 
 /// The buffer size for a bulk endpoint, in bytes.
-const BULK_BUFFER: u32 = 64 * 1024;
+///
+/// The value limits one transfer, so the value must not be below
+/// `READ_BUFFER`.
+const BULK_BUFFER: u32 = 1024 * 1024;
+
+/// The count of bytes the host reads in advance, in bytes.
+///
+/// FUSE asks for 131072 bytes at a time. A copy of 450 MB then needs 3440
+/// requests to the device, and each request costs about 18 milliseconds.
+///
+/// The host reads more than FUSE asks for, and keeps the rest. A later read of
+/// the next part then needs no request. A copy reads a file from the start to
+/// the end, so the next read almost always follows the last one.
+const READ_AHEAD: usize = 4 * 1024 * 1024;
 
 /// The deadline for the first read of a drain, in milliseconds.
 const DRAIN_FIRST_MILLIS: u64 = 15;
@@ -113,6 +129,28 @@ impl From<usb_freebsd::descriptor::DescriptorError> for Error {
     }
 }
 
+/// The bytes the host read in advance, for one object.
+struct ReadCache {
+    handle: u32,
+    start: u64,
+    data: Vec<u8>,
+}
+
+impl ReadCache {
+    /// Gives the bytes for a read, when the cache holds them.
+    fn get(&self, handle: u32, offset: u64, want: usize) -> Option<&[u8]> {
+        if self.handle != handle || offset < self.start {
+            return None;
+        }
+        let from = (offset - self.start) as usize;
+        if from >= self.data.len() {
+            return None;
+        }
+        let to = core::cmp::min(from + want, self.data.len());
+        Some(&self.data[from..to])
+    }
+}
+
 /// The session a mount holds open.
 pub struct Mtp {
     // The order of the fields sets the order of the drop. The channels must
@@ -124,6 +162,8 @@ pub struct Mtp {
     storage: u32,
     /// The operation code the device uses for a partial read.
     partial_read: u16,
+    /// The bytes the host read in advance.
+    cache: Option<ReadCache>,
     /// What the device says about itself.
     pub info: DeviceInfo,
 }
@@ -191,6 +231,7 @@ impl Mtp {
             transaction: 0,
             storage: 0,
             partial_read: op::GET_PARTIAL_OBJECT,
+            cache: None,
             info: DeviceInfo {
                 standard_version: 0,
                 vendor_extension_id: 0,
@@ -287,10 +328,43 @@ impl Mtp {
         want: usize,
         file_size: u64,
     ) -> Result<Vec<u8>, Error> {
-        if want == 0 {
+        if want == 0 || offset >= file_size {
             return Ok(Vec::new());
         }
-        let mut want = want as u64;
+
+        // The cache holds the answer for a read that follows an earlier read.
+        if let Some(c) = &self.cache {
+            if let Some(bytes) = c.get(handle, offset, want) {
+                return Ok(bytes.to_vec());
+            }
+        }
+
+        // Read more than the caller asks for, and keep the rest.
+        let ahead = core::cmp::max(want, READ_AHEAD) as u64;
+        let ask = core::cmp::min(ahead, file_size - offset);
+        let data = self.read_from_device(handle, offset, ask, file_size)?;
+
+        let out = {
+            let end = core::cmp::min(want, data.len());
+            data[..end].to_vec()
+        };
+        self.cache = Some(ReadCache {
+            handle,
+            start: offset,
+            data,
+        });
+        Ok(out)
+    }
+
+    /// Asks the device for part of an object.
+    fn read_from_device(
+        &mut self,
+        handle: u32,
+        offset: u64,
+        want: u64,
+        file_size: u64,
+    ) -> Result<Vec<u8>, Error> {
+        let mut want = want;
 
         // The fault needs two things at once: the read reaches the end of the
         // file, and the last packet holds exactly one USB 2.0 packet.

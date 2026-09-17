@@ -103,6 +103,31 @@ The tree keeps each listing. The tree does not yet drop a listing after a time,
 and a file that another program adds does not appear. This is a known limit,
 and a later version fixes it.
 
+## The rate of a copy
+
+FUSE asks for 131072 bytes at a time. FreeBSD sets the size, and a filesystem
+does not choose it.
+
+Each request to the device costs about 18 milliseconds. A copy of 450 MB needs
+3440 requests, and the copy then takes 63 seconds. That rate is 7.2 MB each
+second, and the link gives 32 MiB each second.
+
+The host therefore reads 4 MB in advance, and keeps the rest for the next read.
+A copy reads a file from the start to the end, so the next read almost always
+follows the last one.
+
+| Read ahead | Time for 450 MB | Rate           |
+| ---------- | --------------- | -------------- |
+| none       | 63 s            | 7.2 MB/s       |
+| 4 MB       | 15 s            | 29.4 MB/s      |
+
+The second rate is close to the 32 MiB each second that a direct copy reaches,
+so the link is again the limit.
+
+The cache holds one part of one object. A program that reads two files at once
+therefore loses the cache on each change. A later version holds more than one
+part.
+
 ## What the first version does
 
 | Operation | The first version |
