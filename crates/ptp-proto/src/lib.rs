@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// The size of a PTP container header, in bytes.
@@ -40,6 +41,11 @@ pub enum ParseError {
     },
     /// A string field does not hold valid UTF-16.
     BadString { field: &'static str },
+    /// A field holds a value the project cannot read.
+    ///
+    /// A parser cannot step over a value whose width it does not know, so the
+    /// caller must use another way to get the same information.
+    Unsupported { field: &'static str, value: u32 },
 }
 
 impl fmt::Display for ParseError {
@@ -63,6 +69,12 @@ impl fmt::Display for ParseError {
                 f,
                 "the field {field} needs {need} bytes, and {got} bytes remain"
             ),
+            Self::Unsupported { field, value } => {
+                write!(
+                    f,
+                    "the field {field} holds {value}, which this project cannot read"
+                )
+            }
             Self::BadString { field } => {
                 write!(f, "the field {field} does not hold valid UTF-16")
             }
@@ -857,5 +869,370 @@ mod tests {
         assert!(r.read_u64("wide").is_err());
         // The failed read must leave the cursor where it was.
         assert_eq!(r.remaining(), 3);
+    }
+}
+
+/// Object property codes the project uses.
+///
+/// A device holds many more properties. The list holds the properties that
+/// give a filesystem the name, the size and the place of an object.
+pub mod prop {
+    /// The storage that holds the object.
+    pub const STORAGE_ID: u16 = 0xdc01;
+    /// The format code. `format::ASSOCIATION` means a folder.
+    pub const OBJECT_FORMAT: u16 = 0xdc02;
+    /// The size of the object, in bytes.
+    pub const OBJECT_SIZE: u16 = 0xdc04;
+    /// The name of the object.
+    pub const OBJECT_FILE_NAME: u16 = 0xdc07;
+    /// The handle of the folder that holds the object.
+    pub const PARENT_OBJECT: u16 = 0xdc0b;
+    /// Asks for every property. The value goes in parameter 3.
+    pub const ALL_PROPERTIES: u32 = 0xffff_ffff;
+}
+
+/// Data type codes of PTP.
+///
+/// A property value carries its own type, so a parser must know the width of
+/// each type to step to the next entry.
+pub mod datatype {
+    pub const INT8: u16 = 0x0001;
+    pub const UINT8: u16 = 0x0002;
+    pub const INT16: u16 = 0x0003;
+    pub const UINT16: u16 = 0x0004;
+    pub const INT32: u16 = 0x0005;
+    pub const UINT32: u16 = 0x0006;
+    pub const INT64: u16 = 0x0007;
+    pub const UINT64: u16 = 0x0008;
+    pub const INT128: u16 = 0x0009;
+    pub const UINT128: u16 = 0x000a;
+    pub const STR: u16 = 0xffff;
+}
+
+/// The value of one object property.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropValue {
+    /// A number of 64 bits or fewer.
+    Number(u64),
+    /// A string.
+    Text(String),
+    /// A value of 128 bits, which the project does not use.
+    Wide,
+}
+
+/// One property of one object, from a `GetObjectPropList` answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropEntry {
+    pub handle: u32,
+    pub code: u16,
+    pub value: PropValue,
+}
+
+/// What a listing needs to know about one object.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PropRecord {
+    pub handle: u32,
+    pub name: String,
+    pub size: u64,
+    pub format: u16,
+    pub parent: u32,
+    pub storage: u32,
+}
+
+impl PropRecord {
+    /// Says whether the object is a folder.
+    pub fn is_folder(&self) -> bool {
+        self.format == format::ASSOCIATION
+    }
+}
+
+/// Reads an `ObjectPropList` dataset.
+///
+/// The dataset holds a count, and then one element for each property of each
+/// object. One request therefore gives the name and the size of every object in
+/// a folder. The older way costs one request for each object.
+///
+/// The shape of one element:
+///
+/// ```text
+/// uint32  the handle of the object
+/// uint16  the property code
+/// uint16  the data type
+/// ...     the value, in the width the data type gives
+/// ```
+///
+/// The function gives an error for a data type it does not know. A caller
+/// cannot step over a value of unknown width, so the caller must use the older
+/// way for that device.
+pub fn parse_object_prop_list(data: &[u8]) -> Result<Vec<PropEntry>, ParseError> {
+    let mut r = Reader::new(data);
+    let count = r.read_u32("prop_list_count")? as usize;
+
+    // A count from a device cannot set the size of an allocation, because a
+    // wrong count then asks for a very large block of memory.
+    let mut out: Vec<PropEntry> = Vec::new();
+
+    for _ in 0..count {
+        let handle = r.read_u32("prop_handle")?;
+        let code = r.read_u16("prop_code")?;
+        let kind = r.read_u16("prop_type")?;
+
+        let value = match kind {
+            datatype::INT8 | datatype::UINT8 => PropValue::Number(r.read_u8("prop_u8")? as u64),
+            datatype::INT16 | datatype::UINT16 => PropValue::Number(r.read_u16("prop_u16")? as u64),
+            datatype::INT32 | datatype::UINT32 => PropValue::Number(r.read_u32("prop_u32")? as u64),
+            datatype::INT64 | datatype::UINT64 => PropValue::Number(r.read_u64("prop_u64")?),
+            datatype::INT128 | datatype::UINT128 => {
+                r.take(16, "prop_u128")?;
+                PropValue::Wide
+            }
+            datatype::STR => PropValue::Text(r.read_string("prop_str")?),
+            _ => {
+                return Err(ParseError::Unsupported {
+                    field: "prop_type",
+                    value: kind as u32,
+                })
+            }
+        };
+
+        out.push(PropEntry {
+            handle,
+            code,
+            value,
+        });
+    }
+
+    Ok(out)
+}
+
+/// Collects the properties of each object into one record for each object.
+///
+/// The order of the answer is the order of the device. The function keeps that
+/// order, because a listing then matches the older way.
+pub fn fold_prop_list(entries: &[PropEntry]) -> Vec<PropRecord> {
+    let mut out: Vec<PropRecord> = Vec::new();
+    let mut seen: BTreeMap<u32, usize> = BTreeMap::new();
+
+    for e in entries {
+        let at = match seen.get(&e.handle) {
+            Some(i) => *i,
+            None => {
+                out.push(PropRecord {
+                    handle: e.handle,
+                    ..Default::default()
+                });
+                seen.insert(e.handle, out.len() - 1);
+                out.len() - 1
+            }
+        };
+
+        let rec = &mut out[at];
+        match (e.code, &e.value) {
+            (prop::OBJECT_FILE_NAME, PropValue::Text(s)) => rec.name = s.clone(),
+            (prop::OBJECT_SIZE, PropValue::Number(n)) => rec.size = *n,
+            (prop::OBJECT_FORMAT, PropValue::Number(n)) => rec.format = *n as u16,
+            (prop::PARENT_OBJECT, PropValue::Number(n)) => rec.parent = *n as u32,
+            (prop::STORAGE_ID, PropValue::Number(n)) => rec.storage = *n as u32,
+            _ => {}
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod prop_list_tests {
+    use super::*;
+
+    /// Builds one element of an `ObjectPropList` dataset.
+    fn element(handle: u32, code: u16, kind: u16, value: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&handle.to_le_bytes());
+        v.extend_from_slice(&code.to_le_bytes());
+        v.extend_from_slice(&kind.to_le_bytes());
+        v.extend_from_slice(value);
+        v
+    }
+
+    /// Builds a PTP string: a count of characters, and then UTF-16.
+    fn ptp_string(s: &str) -> Vec<u8> {
+        let mut units: Vec<u16> = s.encode_utf16().collect();
+        units.push(0);
+        let mut v = vec![units.len() as u8];
+        for u in units {
+            v.extend_from_slice(&u.to_le_bytes());
+        }
+        v
+    }
+
+    fn dataset(elements: &[Vec<u8>]) -> Vec<u8> {
+        let mut v = (elements.len() as u32).to_le_bytes().to_vec();
+        for e in elements {
+            v.extend_from_slice(e);
+        }
+        v
+    }
+
+    #[test]
+    fn an_empty_list_gives_no_entry() {
+        let data = 0u32.to_le_bytes().to_vec();
+        assert_eq!(parse_object_prop_list(&data).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn a_file_gives_a_name_and_a_size() {
+        let data = dataset(&[
+            element(
+                7,
+                prop::OBJECT_FILE_NAME,
+                datatype::STR,
+                &ptp_string("a.jpg"),
+            ),
+            element(
+                7,
+                prop::OBJECT_SIZE,
+                datatype::UINT64,
+                &1_048_576u64.to_le_bytes(),
+            ),
+            element(
+                7,
+                prop::OBJECT_FORMAT,
+                datatype::UINT16,
+                &format::EXIF_JPEG.to_le_bytes(),
+            ),
+            element(
+                7,
+                prop::PARENT_OBJECT,
+                datatype::UINT32,
+                &3u32.to_le_bytes(),
+            ),
+        ]);
+
+        let recs = fold_prop_list(&parse_object_prop_list(&data).unwrap());
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].handle, 7);
+        assert_eq!(recs[0].name, "a.jpg");
+        assert_eq!(recs[0].size, 1_048_576);
+        assert_eq!(recs[0].parent, 3);
+        assert!(!recs[0].is_folder());
+    }
+
+    #[test]
+    fn the_association_format_marks_a_folder() {
+        let data = dataset(&[
+            element(
+                9,
+                prop::OBJECT_FILE_NAME,
+                datatype::STR,
+                &ptp_string("DCIM"),
+            ),
+            element(
+                9,
+                prop::OBJECT_FORMAT,
+                datatype::UINT16,
+                &format::ASSOCIATION.to_le_bytes(),
+            ),
+        ]);
+
+        let recs = fold_prop_list(&parse_object_prop_list(&data).unwrap());
+        assert!(recs[0].is_folder());
+        assert_eq!(recs[0].name, "DCIM");
+    }
+
+    #[test]
+    fn the_order_of_the_device_stays() {
+        let data = dataset(&[
+            element(30, prop::OBJECT_FILE_NAME, datatype::STR, &ptp_string("c")),
+            element(10, prop::OBJECT_FILE_NAME, datatype::STR, &ptp_string("a")),
+            element(20, prop::OBJECT_FILE_NAME, datatype::STR, &ptp_string("b")),
+        ]);
+
+        let recs = fold_prop_list(&parse_object_prop_list(&data).unwrap());
+        let names: Vec<&str> = recs.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn a_property_the_project_does_not_use_does_not_stop_the_parse() {
+        // DateModified is a string, and the project reads no date.
+        let data = dataset(&[
+            element(5, 0xdc09, datatype::STR, &ptp_string("20260916T101500")),
+            element(
+                5,
+                prop::OBJECT_FILE_NAME,
+                datatype::STR,
+                &ptp_string("b.mp4"),
+            ),
+        ]);
+
+        let recs = fold_prop_list(&parse_object_prop_list(&data).unwrap());
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].name, "b.mp4");
+    }
+
+    #[test]
+    fn a_value_of_128_bits_does_not_stop_the_parse() {
+        // Devices send PersistentUniqueObjectIdentifier, which is 128 bits.
+        let data = dataset(&[
+            element(5, 0xdc41, datatype::UINT128, &[0u8; 16]),
+            element(
+                5,
+                prop::OBJECT_FILE_NAME,
+                datatype::STR,
+                &ptp_string("c.png"),
+            ),
+        ]);
+
+        let recs = fold_prop_list(&parse_object_prop_list(&data).unwrap());
+        assert_eq!(recs[0].name, "c.png");
+    }
+
+    #[test]
+    fn a_data_type_the_project_cannot_read_gives_an_error() {
+        // 0x4006 is an array of uint32. A parser cannot step over the value
+        // without the count, so the caller must use the older way.
+        let data = dataset(&[element(5, 0xdc07, 0x4006, &[0u8; 8])]);
+        assert!(matches!(
+            parse_object_prop_list(&data),
+            Err(ParseError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn a_truncated_answer_gives_an_error() {
+        let mut data = dataset(&[element(
+            7,
+            prop::OBJECT_SIZE,
+            datatype::UINT64,
+            &1u64.to_le_bytes(),
+        )]);
+        data.truncate(data.len() - 3);
+        assert!(parse_object_prop_list(&data).is_err());
+    }
+
+    #[test]
+    fn a_count_that_is_too_large_gives_an_error_and_not_a_large_allocation() {
+        // A device that gives a wrong count must not make the host reserve a
+        // very large block of memory.
+        let mut data = 0xffff_ffffu32.to_le_bytes().to_vec();
+        data.extend_from_slice(&element(
+            1,
+            prop::OBJECT_SIZE,
+            datatype::UINT32,
+            &1u32.to_le_bytes(),
+        ));
+        assert!(parse_object_prop_list(&data).is_err());
+    }
+
+    #[test]
+    fn a_size_of_more_than_4_gb_survives() {
+        let data = dataset(&[element(
+            7,
+            prop::OBJECT_SIZE,
+            datatype::UINT64,
+            &5_000_000_000u64.to_le_bytes(),
+        )]);
+        let recs = fold_prop_list(&parse_object_prop_list(&data).unwrap());
+        assert_eq!(recs[0].size, 5_000_000_000);
     }
 }

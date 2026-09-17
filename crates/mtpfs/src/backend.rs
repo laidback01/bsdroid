@@ -101,6 +101,8 @@ pub enum Error {
     NoPartialRead,
     /// The file is too large for the 32-bit size field of MTP.
     TooLarge { size: u64 },
+    /// The fast listing gave an object with no name.
+    BadListing { handle: u32 },
     /// The host read fewer bytes than the host promised the device.
     ShortRead {
         step: &'static str,
@@ -137,6 +139,9 @@ impl std::fmt::Display for Error {
                 "the device reports no storage. Unlock the cellphone, and put \
                  the cellphone into file transfer mode"
             ),
+            Self::BadListing { handle } => {
+                write!(f, "the object {handle} came back with no name")
+            }
             Self::TooLarge { size } => write!(
                 f,
                 "the file holds {size} bytes, and MTP allows {} at most",
@@ -180,6 +185,21 @@ pub struct DeviceEntry {
     pub product_id: u16,
     /// The maker and the model, for a person to read.
     pub name: String,
+}
+
+/// Removes the folder from the list of the objects the folder holds.
+///
+/// A request with a depth of 1 gives the folder and the children of the
+/// folder. A listing needs the children alone.
+///
+/// A Samsung answers this way for a request that names one property, and the
+/// answer then holds 231 objects for a folder of 230 files. The extra object
+/// is the folder.
+pub fn drop_the_folder(
+    records: Vec<ptp_proto::PropRecord>,
+    folder: u32,
+) -> Vec<ptp_proto::PropRecord> {
+    records.into_iter().filter(|r| r.handle != folder).collect()
 }
 
 /// Says whether a data phase needs a packet of zero bytes at the end.
@@ -281,6 +301,11 @@ pub struct Mtp {
     storage: u32,
     /// The operation code the device uses for a partial read.
     partial_read: u16,
+    /// True while `GetObjectPropList` works on this device.
+    ///
+    /// The flag starts as the answer of the device. A fault turns the flag
+    /// off, and the mount then uses the older way for the rest of the session.
+    fast_list: bool,
     /// The largest packet the bulk endpoints accept, in bytes.
     ///
     /// A data phase that is a multiple of this count needs a packet of zero
@@ -433,6 +458,7 @@ impl Mtp {
             transaction: 0,
             storage: 0,
             partial_read: op::GET_PARTIAL_OBJECT,
+            fast_list: false,
             packet: if iface.max_packet_size == 0 {
                 USB2_PACKET
             } else {
@@ -464,6 +490,11 @@ impl Mtp {
 
         // A 64 bit offset is right for a large file, and both test devices
         // give the operation.
+        // `BSDROID_NO_PROPLIST=1` turns the fast listing off. The switch gives
+        // a way to compare the two ways on one device.
+        m.fast_list = m.info.supports(op::GET_OBJECT_PROP_LIST)
+            && std::env::var_os("BSDROID_NO_PROPLIST").is_none();
+
         m.partial_read = if m.info.supports(op::GET_PARTIAL_OBJECT_64) {
             op::GET_PARTIAL_OBJECT_64
         } else if m.info.supports(op::GET_PARTIAL_OBJECT) {
@@ -485,8 +516,101 @@ impl Mtp {
 
     /// Reads the objects a folder holds.
     ///
-    /// The root needs the value 0xffffffff, and a folder needs its own handle.
+    /// The function takes the fast way when the device gives it, and the older
+    /// way when the device does not. A fault in the fast way turns the fast way
+    /// off for the rest of the session, and the older way then answers.
     pub fn list(&mut self, parent: u32) -> Result<Vec<Entry>, Error> {
+        if self.fast_list {
+            match self.list_by_properties(parent) {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    self.fast_list = false;
+                    if std::env::var_os("BSDROID_DEBUG").is_some() {
+                        eprintln!(
+                            "mtpfs: GetObjectPropList failed, and the older way follows: {e}"
+                        );
+                    }
+                }
+            }
+        }
+        self.list_one_at_a_time(parent)
+    }
+
+    /// Reads a folder with one request.
+    ///
+    /// `GetObjectPropList` gives the name, the size and the format of each
+    /// object in a folder. The older way costs one request for each object, so
+    /// a folder of 500 objects costs 501 requests.
+    ///
+    /// The root needs the handle 0 for this operation, and not 0xffffffff.
+    /// The value 0xffffffff means every object on the device.
+    fn list_by_properties(&mut self, parent: u32) -> Result<Vec<Entry>, Error> {
+        const DEPTH_CHILDREN: u32 = 1;
+        let arg = if parent == ROOT { 0 } else { parent };
+
+        // The request names one property. A request for every property costs
+        // more time than it saves, because the device then sends each date,
+        // and each identifier of 128 bits, for each object.
+        //
+        // A measurement on a Samsung, for a folder of 230 objects:
+        //
+        //   one request for each object       0.73 s
+        //   every property, one request       1.99 s
+        //   three properties, three requests  0.21 s
+        const WANTED: [u16; 3] = [
+            ptp_proto::prop::OBJECT_FILE_NAME,
+            ptp_proto::prop::OBJECT_SIZE,
+            ptp_proto::prop::OBJECT_FORMAT,
+        ];
+
+        let mut entries = Vec::new();
+        for code in WANTED {
+            let data = self.operation(
+                "GetObjectPropList",
+                op::GET_OBJECT_PROP_LIST,
+                &[arg, 0, code as u32, 0, DEPTH_CHILDREN],
+            )?;
+            entries.extend(ptp_proto::parse_object_prop_list(&data)?);
+        }
+
+        let raw = ptp_proto::fold_prop_list(&entries);
+        if std::env::var_os("BSDROID_DEBUG").is_some() {
+            eprintln!(
+                "mtpfs: proplist folder arg={arg} gave {} records",
+                raw.len()
+            );
+            for r in raw.iter().take(4) {
+                eprintln!(
+                    "  handle={} name={:?} format={:#06x}",
+                    r.handle, r.name, r.format
+                );
+            }
+        }
+        let records = drop_the_folder(raw, arg);
+
+        let mut out = Vec::with_capacity(records.len());
+        for r in records {
+            // A record with no name means the device answered with a shape
+            // this project does not expect. The older way then answers.
+            if r.name.is_empty() {
+                return Err(Error::BadListing { handle: r.handle });
+            }
+            let is_dir = r.is_folder();
+            out.push(Entry {
+                handle: r.handle,
+                parent,
+                name: r.name,
+                is_dir,
+                size: r.size,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Reads a folder with one request for each object.
+    ///
+    /// The root needs the value 0xffffffff, and a folder needs its own handle.
+    fn list_one_at_a_time(&mut self, parent: u32) -> Result<Vec<Entry>, Error> {
         let arg = if parent == ROOT { LIST_ROOT } else { parent };
         let data = self.operation(
             "GetObjectHandles",
@@ -1108,7 +1232,30 @@ impl Write for Sink {
 
 #[cfg(test)]
 mod packet_tests {
-    use super::{needs_zero_packet, split_final_read};
+    use super::{drop_the_folder, needs_zero_packet, split_final_read};
+
+    fn record(handle: u32, name: &str) -> ptp_proto::PropRecord {
+        ptp_proto::PropRecord {
+            handle,
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_folder_goes_out_of_its_own_listing() {
+        let recs = vec![record(5, "Camera"), record(6, "a.jpg"), record(7, "b.jpg")];
+        let kept = drop_the_folder(recs, 5);
+        let names: Vec<&str> = kept.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["a.jpg", "b.jpg"]);
+    }
+
+    #[test]
+    fn the_root_keeps_each_object() {
+        // The root uses the handle 0, and no object holds the handle 0.
+        let recs = vec![record(1, "DCIM"), record(2, "Download")];
+        assert_eq!(drop_the_folder(recs, 0).len(), 2);
+    }
 
     #[test]
     fn a_full_last_packet_needs_a_packet_of_zero_bytes() {

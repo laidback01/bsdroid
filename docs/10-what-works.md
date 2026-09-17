@@ -22,6 +22,10 @@ mtpfs ugen0.11 /mnt/phone
 
 A node name takes two forms, `ugen0.11` and `/dev/ugen0.11`.
 
+A file manager stops the mount correctly. Nautilus calls `umount`, which closes
+the MTP session on the cellphone. A signal to the program does not close the
+session, and the next mount then needs a repair.
+
 ### Two cellphones at one time
 
 Each mount holds one session, on one device. Two mounts therefore hold two
@@ -44,6 +48,7 @@ then held the same cellphone. A name gives the device a caller wants.
 | -------------------------- | -------------- | ----- |
 | Mount                      | `mtpfs`        | yes   |
 | Stop the mount             | `umount`       | yes   |
+| Stop the mount from a GUI  | file manager   | yes   |
 | List a folder              | `ls`           | yes   |
 | Read the size and the kind | `stat`         | yes   |
 | Read a file                | `cp`, `cat`    | yes   |
@@ -128,17 +133,58 @@ the device.
 A copy of one file after another is therefore fast. A copy of two files at the
 same time is slow.
 
-### A listing costs one request for each object
+### A listing costs three requests
 
-`GetObjectHandles` gives the handles of a folder in one request. The name and
-the size of each object then cost one request each.
+`GetObjectPropList` gives one property of every object in a folder, in one
+request. A listing needs three properties:
 
-A folder with 500 objects costs 501 requests. At about 20 milliseconds each,
-the listing takes about 10 seconds.
+1. The name of the object.
+2. The size of the object.
+3. The format of the object, which says whether the object is a folder.
 
-A device gives an operation that reads a folder in one request,
-`GetObjectPropList`, and both test devices support the operation. The project
-does not use the operation yet. This is the largest improvement that remains.
+A folder therefore costs three requests, and the count does not grow with the
+count of objects.
+
+The older way costs one request for each object. `GetObjectHandles` gives the
+handles in one request. `GetObjectInfo` then gives the name and the size of one
+object. A folder with 229 objects costs 230 requests.
+
+A measurement on a Samsung, for a folder of 229 objects:
+
+| Way                                | Time   |
+| ---------------------------------- | ------ |
+| One request for each object        | 0.73 s |
+| Three properties, three requests   | 0.21 s |
+
+Both ways give the same listing. A test compares the name and the size of each
+object, on a Samsung and on a Motorola.
+
+A device that reports `GetObjectPropList` gets the fast way. A fault turns the
+fast way off for the rest of the session, and the older way then answers.
+`BSDROID_NO_PROPLIST=1` turns the fast way off from the start.
+
+#### Two corrections
+
+An earlier version of this document gave an estimate. A folder of 500 objects
+takes about 10 seconds, at about 20 milliseconds for each request. The
+measurement says 3.2 milliseconds for each request. The estimate was wrong by a
+factor of six. The old way was never as slow as this document said.
+
+The first version of the fast way asked for every property in one request. That
+version was slower than the old way, at 1.99 seconds. The device sends each
+date, and each identifier of 128 bits, for each object. A request that names
+one property sends only the bytes a listing needs.
+
+### The folder comes back in its own listing
+
+A request with a depth of 1 gives the folder, and the children of the folder. A
+listing needs the children alone.
+
+A Samsung answers this way for a request that names one property. The answer
+holds 230 objects for a folder of 229 files, and the extra object is the
+folder. A file manager then shows `DCIM` inside `DCIM`.
+
+The mount removes the folder from the answer. A test covers the rule.
 
 ### A listing does not change
 
