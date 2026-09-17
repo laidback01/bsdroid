@@ -70,7 +70,10 @@ cleanup_mount() {
     timeout 30 rm -rf "$SCRATCH" 2>/dev/null || true
     timeout 20 umount "$MNT" 2>/dev/null || timeout 20 umount -f "$MNT" 2>/dev/null || true
 }
-trap 'cleanup_mount; rm -f "$SRC" "$LOG"' EXIT
+# Keep the log. It holds what the mount said about each device, and a
+# run that finds something is worth reading afterwards. An earlier
+# version removed it, and the detail of a whole test went with it.
+trap 'cleanup_mount; rm -f "$SRC"' EXIT
 
 resolve_node() {
     "$FS" -l 2>/dev/null | awk -v vp="$VIDPID" '$2 == vp {print $1; exit}'
@@ -89,6 +92,7 @@ mkdir -p "$MNT"
 cleanup_mount
 
 note "watching $VIDPID for $RUN_FOR seconds, in $MODE mode."
+note "the mount writes to $LOG"
 note "Pull the cable whenever you like. A fault is a pass."
 
 START=$(date +%s)
@@ -202,4 +206,5 @@ if [ "$hung" -gt 0 ] || [ "$corrupt" -gt 0 ] || [ "$lost" -gt 0 ]; then
     note "RESULT: a command hung, or a write gave wrong bytes, or a write was lost."
     exit 1
 fi
+note "the mount log is at $LOG"
 note "RESULT: every command came back. A timeout is a result, and not a hang."
