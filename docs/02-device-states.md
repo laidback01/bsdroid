@@ -333,3 +333,40 @@ developer mode on the cellphone, so the product cannot depend on `adb`.
 No test yet shows a way to learn the USB mode over MTP alone. The
 `GetDeviceInfo` operation gives a list of supported operations, and no test yet
 shows that the list changes with the mode.
+
+## A short cable interruption keeps the mode, and a long one does not
+
+A cellphone that leaves the bus and comes back does not always come back in
+file transfer mode. The time off the bus decides it.
+
+| Device                     | Cable back within | What the cellphone did      |
+| -------------------------- | ----------------- | --------------------------- |
+| Samsung SM-S901U           | 1 second          | stayed in file transfer     |
+| Cyrus CS 24, 0x0e8d:0x2008 | 2 seconds         | stayed in file transfer     |
+| both                       | a longer time     | went back to charge only    |
+
+A person measured this by hand, with the cable.
+
+### Why this matters for a cable
+
+A cable with a bad contact does more than stop a transfer. A break of more
+than one second puts the cellphone back in charge only mode. The MTP interface
+is still there, and the storage list is empty, so the host reports:
+
+```text
+the device reports no storage. Unlock the cellphone, and put the cellphone
+into file transfer mode
+```
+
+The message is correct. The cause is the cable.
+
+A user sees a program that worked a moment ago and now finds no files. Nothing
+on the host names the cable, because the host cannot see it. The cellphone
+changed its own mode, and it did so for a reason the host never learns.
+
+The README asks you to use a good cable. This is one of the reasons.
+
+### The rule
+
+A repeated fall into charge only mode is a sign of a cable, and not a sign of
+a cellphone or a host. Change the cable first.
