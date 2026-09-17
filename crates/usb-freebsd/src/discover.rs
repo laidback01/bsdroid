@@ -141,13 +141,22 @@ pub fn list(backend: &Rc<Backend>, timeout: Duration) -> Vec<Found> {
 /// after a reconnect can therefore reach a cellphone it did not mean, and
 /// write files to it.
 ///
-/// The vendor and the product do not change. Name a device that way when the
-/// answer must stay right across a reconnect.
+/// The vendor and the product hold across a reconnect. Name a device that way
+/// when the answer must stay right.
+///
+/// The product does change with the USB mode. A Samsung SM-S901U gives 0x6860
+/// in file transfer mode and in charge only mode, 0x6866 in image transfer
+/// mode, 0x6864 for tethering, and 0x686c for MIDI. See
+/// `docs/02-device-states.md`.
+///
+/// A name that holds one mode is the right limit for a filesystem. A caller
+/// wants a cellphone that holds files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selector {
     /// A bus and an address, as in `ugen0.11`. Not stable across a reconnect.
     Node(Node),
-    /// A vendor and a product, as in `04e8:6860`. Stable.
+    /// A vendor and a product, as in `04e8:6860`. Holds across a reconnect,
+    /// and names one USB mode.
     Ids { vendor: u16, product: u16 },
 }
 

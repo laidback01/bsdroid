@@ -411,7 +411,7 @@ mtpfs ugen0.12 /mnt/phone
 reaches one cellphone today and another cellphone after a reconnect. A script
 that copies files can therefore write to a cellphone the person did not mean.
 
-The vendor and the product do not change. Both programs take that form:
+The identifiers hold across a reconnect. Both programs take that form:
 
 ```text
 mtpfs 04e8:6860 /mnt/phone
@@ -419,6 +419,19 @@ mtpprobe -d 0e8d:2008 probe
 ```
 
 `mtpfs -l` prints both names for each cellphone.
+
+### The identifiers hold across a reconnect, and not across a mode change
+
+The table earlier in this file gives the product for each mode of a Samsung
+SM-S901U. File transfer and charge only share 0x6860. Image transfer gives
+0x6866, tethering gives 0x6864, and MIDI gives 0x686c.
+
+So `04e8:6860` names one cellphone in one mode. The same cellphone in image
+transfer mode is `04e8:6866`, and no name finds it in tethering mode, because
+that mode carries no MTP interface.
+
+That limit is the right one for a filesystem. A caller wants a cellphone that
+holds files, and a cellphone in tethering mode does not.
 
 ### The rule
 

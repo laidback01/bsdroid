@@ -266,7 +266,10 @@ must stay right:
 mtpfs 04e8:6860 /mnt/phone
 ```
 
-`mtpfs -l` prints both names. See `docs/02-device-states.md`.
+`mtpfs -l` prints both names.
+
+The product changes with the USB mode of the cellphone, so a pair of
+identifiers names one cellphone in one mode. See `docs/02-device-states.md`.
 
 With no device, the program takes the first cellphone it finds:
 
