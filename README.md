@@ -237,25 +237,57 @@ Three cellphones, and each one reads and writes:
 Three makers, two chip makers, and three versions of Android that are eight
 years apart.
 
-### Why this covers more than three cellphones
+### How this project finds a device
 
-A cellphone gives MTP in one of two shapes. The three above give both shapes,
-and this project finds both:
+A cellphone gives MTP in one of two shapes, and the three above give both:
 
 1. The still imaging class, 0x06/0x01/0x01, which the USB standard defines.
 2. A vendor class, 0xff/0xff/0x00, with the interface name `MTP`.
 
-The name `MTP` is the same on all three, across both shapes and both chip
-makers.
+This project reads the descriptor and finds each shape. The project holds no
+list of device identifiers.
 
-For the faults, `libmtp` gives 833 Android entries the same six flags. This
-project handles each of the six with no device table. See
-`docs/08-what-libmtp-knows.md`.
+### How libmtp finds a device, which is not the same
+
+`libmtp` looks in the table of 1529 devices first, by vendor identifier and
+product identifier. The comment in the source gives the reason:
+
+```
+// First check if we know about the device already.
+// Devices well known to us will not have their descriptors
+// probed, it caused problems with some devices.
+```
+
+A device that is absent from the table gets a second test. `libmtp` reads a
+Microsoft descriptor at string index 0xee, and looks for the letters `MSFT`.
+
+The second test needs a vendor class. The test for the still imaging class sits
+inside `#if 0` in `libusb1-glue.c`, so the test never runs.
+
+The table is therefore not a list of faults. The table is how `libmtp` finds
+most devices.
+
+### What each one finds, and what each one misses
+
+| Shape of the device                    | `libmtp`        | This project |
+| -------------------------------------- | --------------- | ------------ |
+| Still imaging class, in the table      | yes             | yes          |
+| Still imaging class, absent from the table | no          | yes          |
+| Vendor class, named `MTP`              | yes             | yes          |
+| Vendor class, with a Microsoft descriptor | yes           | **no**       |
+
+The first project has a table with many years of work in it. This project reads
+the descriptor, so a new device needs no entry.
+
+The last row is a gap in this project. A device with a vendor class, and an
+interface name that is not `MTP`, gives a Microsoft descriptor that `libmtp`
+reads and this project does not. No test device of this project needs that
+test, so the project has no way to test the code.
 
 ### What is not measured
 
 This project does not claim a number. The `libmtp` table records no interface
-class, so nobody can count how many of those 1529 devices this project finds.
+class, so nobody can count how many of those 1529 devices have which shape.
 A count here would be a guess with a decimal point on it.
 
 ### If your cellphone does not work

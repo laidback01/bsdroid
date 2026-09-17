@@ -127,7 +127,47 @@ reset, so a reset is not the default.
 
 The two answers agree, and the two answers come from different work.
 
-## Does this project need the database?
+## What the database is for
+
+An earlier version of this document called the database a list of faults. That
+is not right, and the source shows why.
+
+`libusb1-glue.c` looks in the table first, by vendor identifier and product
+identifier:
+
+```
+// First check if we know about the device already.
+// Devices well known to us will not have their descriptors
+// probed, it caused problems with some devices.
+```
+
+A device in the table is an MTP device, and `libmtp` reads no descriptor. A
+device that is absent gets a second test: `libmtp` reads a Microsoft descriptor
+at string index 0xee, and looks for the letters `MSFT`.
+
+The second test needs a vendor class. The test for the still imaging class sits
+inside `#if 0`, so the test never runs.
+
+The table is therefore how `libmtp` finds most devices. The flags are a second
+job of the same table.
+
+### What this means for the comparison
+
+This project reads the interface descriptor, and finds two shapes:
+
+- the still imaging class, 0x06/0x01/0x01,
+- a vendor class with the interface name `MTP`.
+
+`libmtp` finds the first shape only from the table, because the test for that
+class is off. This project finds the first shape for any device.
+
+`libmtp` finds a vendor class device with a Microsoft descriptor. This project
+does not read that descriptor, so this project misses such a device.
+
+Neither project covers the other. The table holds many years of work, and a
+descriptor test needs no entry for a new device.
+
+## Does this project need the flags?
 
 The database covers 1529 devices, and this project tested three. A fair
 question follows: does this project work for a person with a different device?
