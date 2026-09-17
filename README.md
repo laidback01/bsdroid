@@ -141,6 +141,29 @@ for the spool file; the default is `/var/tmp`.
 accepts each request and changes nothing. A fault there stops a copy, and a
 copy is the job.
 
+### You cannot overwrite a file that is already there
+
+Copy onto an existing file and you get this:
+
+```
+cp: /mnt/phone/Download/holiday.jpg: Read-only file system
+```
+
+The mount is not read-only. That is the error code for "this version cannot
+change a file that is already on the phone". Delete it first, then copy:
+
+```
+rm /mnt/phone/Download/holiday.jpg
+cp holiday.jpg /mnt/phone/Download/
+```
+
+A file manager may show this as a failed or refused copy when you answer
+"Replace" to its overwrite prompt.
+
+Writing a new file is fine. It is only the replace case that fails. MTP has
+operations for editing a file in place and both test phones support them, so
+this is a gap in the program rather than a limit of the protocol.
+
 `docs/10-what-works.md` holds the full list, with each limit and the reason.
 
 ## Use a good cable. Seriously.
