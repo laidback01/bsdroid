@@ -1,4 +1,5 @@
 # Device capture: cyrus-cs24-ptp
+# The shop name of this telephone is NUU B20.
 # node: ugen0.11
 
 ## usbconfig

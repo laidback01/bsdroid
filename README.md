@@ -64,6 +64,7 @@ The project needs reports from many devices. At present the project has three:
 | Item                     | Samsung SM-S901U | Motorola Moto G (5) | Cyrus CS 24    |
 | ------------------------ | ---------------- | ------------------- | -------------- |
 | Chip maker               | Qualcomm         | Qualcomm            | MediaTek       |
+| The name in the shop     | Galaxy S22       | Moto G (5)          | NUU B20        |
 | MTP interface class      | 0x06/0x01/0x01   | 0xff/0xff/0x00      | 0x06/0x01/0x01 |
 | The name of the interface | `MTP`           | `MTP`               | `MTP`          |
 | Interfaces in this mode  | 4                | 2                   | 1              |
