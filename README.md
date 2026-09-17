@@ -308,13 +308,18 @@ The tests need no cellphone. The test data comes from real captures, and
 
 ### What is verified
 
-Three cellphones, and each one reads and writes:
+Three cellphones. Two read and write. One reads, and does not write:
 
-| Cellphone           | Sold as    | Chip     | Android | MTP interface  |
-| ------------------- | ---------- | -------- | ------- | -------------- |
-| Samsung SM-S901U    | Galaxy S22 | Qualcomm | 16      | 0x06/0x01/0x01 |
-| Motorola Moto G (5) | Moto G5    | Qualcomm | 8.1     | 0xff/0xff/0x00 |
-| Cyrus CS 24         | NUU B20    | MediaTek | 11      | 0x06/0x01/0x01 |
+| Cellphone           | Chip     | Android | Read | Write |
+| ------------------- | -------- | ------- | ---- | ----- |
+| Samsung SM-S901U    | Qualcomm | 16      | yes  | yes   |
+| Motorola Moto G (5) | Qualcomm | 8.1     | yes  | yes   |
+| Cyrus CS 24         | MediaTek | 11      | yes  | no    |
+
+The Cyrus CS 24 finds, lists and reads correctly. A write stops in the data
+phase, and the result is not the same each time. A longer deadline, a smaller
+write and a USB reset each gave no repair. `aft-mtp-mount` does not list that
+cellphone at all. See `docs/10-what-works.md`.
 
 Three makers, two chip makers, and three versions of Android that are eight
 years apart.

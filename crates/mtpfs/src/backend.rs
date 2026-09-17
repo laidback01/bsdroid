@@ -16,6 +16,21 @@ use crate::tree::{Entry, ROOT};
 /// The deadline for one transfer.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Gives the deadline for one transfer.
+///
+/// `BSDROID_TIMEOUT` holds a count of seconds, and gives a longer deadline for
+/// a slow device. `libmtp` holds a flag with the same purpose,
+/// `DEVICE_FLAG_LONG_TIMEOUT`.
+fn timeout() -> Duration {
+    match std::env::var("BSDROID_TIMEOUT") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(n) if n > 0 => Duration::from_secs(n),
+            _ => TIMEOUT,
+        },
+        Err(_) => TIMEOUT,
+    }
+}
+
 /// The size of one read, in bytes.
 ///
 /// A larger buffer needs fewer reads for one data phase. FUSE asks for 131072
@@ -40,6 +55,23 @@ const READ_AHEAD: usize = 4 * 1024 * 1024;
 
 /// The count of bytes the host writes in one transfer.
 const WRITE_CHUNK: usize = 512 * 1024;
+
+/// Gives the count of bytes in one write to the device.
+///
+/// `BSDROID_WRITE_CHUNK` holds the count, and gives a smaller write for a
+/// device that cannot take a large one. The MTP driver of an Android kernel
+/// holds a buffer of 16384 bytes, in `MTP_BULK_BUFFER_SIZE`.
+fn write_chunk() -> usize {
+    match std::env::var("BSDROID_WRITE_CHUNK") {
+        Ok(v) => match v.parse::<usize>() {
+            // The count must hold the header, and must be a whole number of
+            // USB packets.
+            Ok(n) if n > ptp_proto::HEADER_LEN && n % 512 == 0 => n,
+            _ => WRITE_CHUNK,
+        },
+        Err(_) => WRITE_CHUNK,
+    }
+}
 
 /// The deadline for the first read of a drain, in milliseconds.
 const DRAIN_FIRST_MILLIS: u64 = 15;
@@ -336,7 +368,7 @@ impl Mtp {
                 Ok(o) => o,
                 Err(_) => continue,
             };
-            let raw = match open.config_descriptor_raw(TIMEOUT) {
+            let raw = match open.config_descriptor_raw(timeout()) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -405,7 +437,7 @@ impl Mtp {
                 Ok(o) => o,
                 Err(_) => continue,
             };
-            let raw = match open.config_descriptor_raw(TIMEOUT) {
+            let raw = match open.config_descriptor_raw(timeout()) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -957,31 +989,31 @@ impl Mtp {
         self.transaction = self.transaction.wrapping_add(1);
 
         let command = ptp_proto::build_command(code, tid, params);
-        self.channels.write.write(&command, TIMEOUT)?;
+        self.channels.write.write(&command, timeout())?;
 
         // The first write holds the header, and the start of the payload.
         let total = (ptp_proto::HEADER_LEN as u64 + size) as u32;
         let mut first = ptp_proto::build(ptp_proto::ContainerType::Data, code, tid, &[]);
         first[0..4].copy_from_slice(&total.to_le_bytes());
 
-        let mut buf = vec![0u8; WRITE_CHUNK];
-        let room = WRITE_CHUNK - ptp_proto::HEADER_LEN;
+        let mut buf = vec![0u8; write_chunk()];
+        let room = write_chunk() - ptp_proto::HEADER_LEN;
         let want = core::cmp::min(room as u64, size) as usize;
         read_exact_or_short(reader, &mut buf[..want], step)?;
         first.extend_from_slice(&buf[..want]);
-        self.channels.write.write(&first, TIMEOUT)?;
+        self.channels.write.write(&first, timeout())?;
 
         let mut sent = want as u64;
 
         // The loop has a bound that comes from the size, so the loop stops.
-        let rounds = size / WRITE_CHUNK as u64 + 4;
+        let rounds = size / write_chunk() as u64 + 4;
         for _ in 0..rounds {
             if sent >= size {
                 break;
             }
-            let want = core::cmp::min(WRITE_CHUNK as u64, size - sent) as usize;
+            let want = core::cmp::min(write_chunk() as u64, size - sent) as usize;
             read_exact_or_short(reader, &mut buf[..want], step)?;
-            self.channels.write.write(&buf[..want], TIMEOUT)?;
+            self.channels.write.write(&buf[..want], timeout())?;
             sent += want as u64;
         }
 
@@ -1002,11 +1034,11 @@ impl Mtp {
         // 1024 packets of 512 bytes. That file stopped the device before this
         // code.
         if needs_zero_packet(total as u64, self.packet) {
-            self.channels.write.write(&[], TIMEOUT)?;
+            self.channels.write.write(&[], timeout())?;
         }
 
         let mut rbuf = vec![0u8; READ_BUFFER];
-        let n = self.channels.read.read(&mut rbuf, TIMEOUT)?;
+        let n = self.channels.read.read(&mut rbuf, timeout())?;
         let c = Container::parse(&rbuf[..n])?;
         Ok((c.code, c.parameters()))
     }
@@ -1045,7 +1077,7 @@ impl Mtp {
         self.transaction = self.transaction.wrapping_add(1);
 
         let command = ptp_proto::build_command(code, tid, params);
-        self.channels.write.write(&command, TIMEOUT)?;
+        self.channels.write.write(&command, timeout())?;
 
         // The data container holds the header and the payload. A large payload
         // goes in parts, because one transfer has a limit.
@@ -1056,15 +1088,15 @@ impl Mtp {
         first[0..4].copy_from_slice(&total.to_le_bytes());
 
         // The first write holds the header and as much payload as fits.
-        let room = WRITE_CHUNK - ptp_proto::HEADER_LEN;
+        let room = write_chunk() - ptp_proto::HEADER_LEN;
         let take = core::cmp::min(room, payload.len());
         first.extend_from_slice(&payload[..take]);
-        self.channels.write.write(&first, TIMEOUT)?;
+        self.channels.write.write(&first, timeout())?;
 
         let mut sent = take;
         while sent < payload.len() {
-            let end = core::cmp::min(sent + WRITE_CHUNK, payload.len());
-            self.channels.write.write(&payload[sent..end], TIMEOUT)?;
+            let end = core::cmp::min(sent + write_chunk(), payload.len());
+            self.channels.write.write(&payload[sent..end], timeout())?;
             sent = end;
         }
 
@@ -1077,12 +1109,12 @@ impl Mtp {
         // 1024 packets of 512 bytes. That file stopped the device before this
         // code.
         if needs_zero_packet(total as u64, self.packet) {
-            self.channels.write.write(&[], TIMEOUT)?;
+            self.channels.write.write(&[], timeout())?;
         }
 
         // Read the response.
         let mut buf = vec![0u8; READ_BUFFER];
-        let n = self.channels.read.read(&mut buf, TIMEOUT)?;
+        let n = self.channels.read.read(&mut buf, timeout())?;
         let c = Container::parse(&buf[..n])?;
         if c.kind != ContainerType::Response {
             return Err(Error::Device { step, code: c.code });
@@ -1156,12 +1188,12 @@ impl Mtp {
         self.transaction = self.transaction.wrapping_add(1);
 
         let command = ptp_proto::build_command(code, tid, params);
-        self.channels.write.write(&command, TIMEOUT)?;
+        self.channels.write.write(&command, timeout())?;
 
         let mut data = Vec::new();
         let mut buf = vec![0u8; READ_BUFFER];
 
-        let n = self.channels.read.read(&mut buf, TIMEOUT)?;
+        let n = self.channels.read.read(&mut buf, timeout())?;
         let first = Header::parse(&buf[..n])?;
 
         let response = match first.kind {
@@ -1176,7 +1208,7 @@ impl Mtp {
                     if have >= declared {
                         break;
                     }
-                    let more = self.channels.read.read(&mut buf, TIMEOUT)?;
+                    let more = self.channels.read.read(&mut buf, timeout())?;
                     if more == 0 {
                         break;
                     }
@@ -1184,7 +1216,7 @@ impl Mtp {
                     have += more;
                 }
 
-                let n2 = self.channels.read.read(&mut buf, TIMEOUT)?;
+                let n2 = self.channels.read.read(&mut buf, timeout())?;
                 Container::parse(&buf[..n2])?.code
             }
             ContainerType::Response => first.code,
@@ -1216,6 +1248,22 @@ impl Mtp {
 impl Drop for Mtp {
     fn drop(&mut self) {
         let _ = self.operation_code("CloseSession", OP_CLOSE_SESSION, &[]);
+
+        // `BSDROID_USB_RESET=1` sends a USB reset when the session closes.
+        //
+        // `libmtp` holds the flag `DEVICE_FLAG_FORCE_RESET_ON_CLOSE` for this,
+        // and the flag is on the entry for the MediaTek chip 0x0e8d:0x2008.
+        // The comment of the flag says that some devices do not like a reset,
+        // so `libmtp` does not reset by default either.
+        //
+        // A reset is not the PTP operation 0x66. A reset goes to the USB port,
+        // and the device then starts again. The node name of the device can
+        // change, so a caller who names a node must read the name again.
+        if std::env::var_os("BSDROID_USB_RESET").is_some() {
+            if let Err(e) = self._device.reset() {
+                eprintln!("mtpfs: the USB reset failed: {e}");
+            }
+        }
     }
 }
 

@@ -276,6 +276,88 @@ Each fault has a test with the number that found the fault. One test adds the
 two parts of a split read, and checks that the total is the count the caller
 asked for.
 
+## A device that does not take a write
+
+The Cyrus CS 24 reads, and the Cyrus CS 24 does not write.
+
+| Operation on the Cyrus CS 24        | State        |
+| ----------------------------------- | ------------ |
+| Find the device                     | yes          |
+| List a folder                       | yes          |
+| Read a file                         | yes          |
+| Make a folder                       | yes          |
+| Report the free space               | yes          |
+| Write a file                        | **not sure** |
+
+A read is correct. Five reads of a file of 16896994 bytes give the same
+SHA-256 sum. A listing is correct, and the two ways of a listing agree.
+
+A write stops in the data phase of `SendObject`. The host reports a timeout on
+the bulk endpoint. The session then holds an open transaction, and the
+next operation gets the code 0x2002.
+
+The result of a write is not the same each time. One size gives a fault in one
+test, and no fault in the next test. A count of writes at 131072 bytes gave 0
+of 6, then 1 of 6, then 6 of 6 in an earlier test.
+
+### What did not repair the fault
+
+| Test                                     | Result       |
+| ---------------------------------------- | ------------ |
+| A deadline of 60 seconds                 | no change    |
+| A write of 16384 bytes for each transfer | no change    |
+| A USB reset at the close of the session  | 1 of 6       |
+| A power cycle of the cellphone           | no change    |
+
+The size of the file is not the cause. A file of 98304 bytes and a file of
+131072 bytes passed in the same test that a file of 32768 bytes failed.
+
+A failed write leaves no object on the device. The folder holds the same
+objects before the test and after the test.
+
+### What `libmtp` knows
+
+`libmtp` holds this entry for the chip:
+
+```c
+{ "MediaTek Inc", 0x0e8d, "MT65xx/67xx (MTP mode)", 0x2008,
+    DEVICE_FLAGS_ANDROID_BUGS },
+```
+
+`DEVICE_FLAGS_ANDROID_BUGS` holds six flags. Two of the six touch this work:
+
+- `DEVICE_FLAG_FORCE_RESET_ON_CLOSE` says the device needs a USB reset after
+  each connection. The comment says that some devices do not like a reset, so
+  `libmtp` does not reset by default. A test of the reset gave 1 of 6.
+- `DEVICE_FLAG_BROKEN_MTPGETOBJPROPLIST` says `GetObjectPropList` is broken on
+  this chip. This project uses that operation for a listing. The listing of
+  this device is correct, and matches the older way, so this project keeps the
+  operation. A later report can change the rule.
+
+No flag in the database describes a write that stops.
+
+### What another program does
+
+`aft-mtp-mount` does not list this device. The mount starts, and the first
+listing gives `Device not configured`.
+
+`aft-mtp-mount` stops. This project then reads the device, and lists the
+device. A read gives the correct SHA-256 sum.
+
+### Three switches for a report
+
+A person with a device that does not write can try these switches. None of the
+three repaired the Cyrus CS 24, and each one is a test for a new device.
+
+| Switch                     | What the switch does                     |
+| -------------------------- | ---------------------------------------- |
+| `BSDROID_TIMEOUT=60`       | Gives a deadline of 60 seconds           |
+| `BSDROID_WRITE_CHUNK=16384` | Writes 16384 bytes for each transfer    |
+| `BSDROID_USB_RESET=1`      | Sends a USB reset at the close of the session |
+
+A USB reset can change the node name of the device. Read the name again with
+`mtpfs -l` after a reset.
+
 ## The device, and not the filesystem
 
 | Limit                        | Cause                                     |
